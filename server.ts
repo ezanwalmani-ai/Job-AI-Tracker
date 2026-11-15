@@ -33,6 +33,37 @@ async function startServer() {
   const app = express();
   const PORT = Number(process.env.PORT) || 3000;
 
+  const allowedOrigins = new Set(
+    [
+      'https://jobaitracker.netlify.app',
+      'https://www.jobaitracker.netlify.app',
+      process.env.APP_URL,
+      'http://localhost:3000',
+    ]
+      .filter((v): v is string => Boolean(v))
+      .map((u) => u.replace(/\/+$/, ''))
+  );
+
+  app.use((req, res, next) => {
+    const origin = req.headers.origin;
+    if (
+      origin &&
+      (allowedOrigins.has(origin) ||
+        /^https:\/\/[a-z0-9-]+\.netlify\.app$/i.test(origin) ||
+        /^https:\/\/[a-z0-9-]+\.run\.app$/i.test(origin))
+    ) {
+      res.setHeader('Access-Control-Allow-Origin', origin);
+      res.setHeader('Vary', 'Origin');
+      res.setHeader('Access-Control-Allow-Methods', 'GET,POST,OPTIONS');
+      res.setHeader('Access-Control-Allow-Headers', 'Content-Type,Authorization,X-Gmail-Token');
+    }
+    if (req.method === 'OPTIONS') {
+      res.status(204).end();
+      return;
+    }
+    next();
+  });
+
   app.use(express.json({ limit: '25mb' }));
 
   app.get('/api/health', (_req, res) => {

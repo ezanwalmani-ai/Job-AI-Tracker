@@ -1,6 +1,8 @@
 import type { EmailPurposeType, ExtractedJobDetails, PdfValidationReport } from '../types.ts';
 import { getFirebaseIdToken, getGmailAccessToken } from './firebase.ts';
 
+const API_BASE = ((import.meta.env.VITE_API_BASE_URL as string | undefined) || '').replace(/\/+$/, '');
+
 async function apiRequest<T>(
   url: string,
   body: unknown,
@@ -22,7 +24,8 @@ async function apiRequest<T>(
     headers['X-Gmail-Token'] = gmailToken;
   }
 
-  const res = await fetch(url, {
+  const targetUrl = url.startsWith('http') ? url : `${API_BASE}${url}`;
+  const res = await fetch(targetUrl, {
     method: 'POST',
     headers,
     body: JSON.stringify(body),

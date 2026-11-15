@@ -9,9 +9,17 @@ import {
 import { getFirestore, doc, getDocFromServer } from 'firebase/firestore';
 import firebaseConfig from '../../firebase-applet-config.json';
 
-const app = initializeApp(firebaseConfig);
+const resolvedAuthDomain =
+  (import.meta.env.VITE_FIREBASE_AUTH_DOMAIN as string | undefined)?.trim() ||
+  firebaseConfig.authDomain;
+
+const app = initializeApp({
+  ...firebaseConfig,
+  authDomain: resolvedAuthDomain,
+});
 export const db = getFirestore(app, firebaseConfig.firestoreDatabaseId);
 export const auth = getAuth(app);
+auth.useDeviceLanguage();
 
 export const GMAIL_SCOPES = [
   'https://www.googleapis.com/auth/gmail.send',
@@ -37,9 +45,9 @@ function buildGoogleProvider(forceConsent = false): GoogleAuthProvider {
   for (const scope of GMAIL_SCOPES) {
     provider.addScope(scope);
   }
-  if (forceConsent) {
-    provider.setCustomParameters({ prompt: 'consent select_account' });
-  }
+  provider.setCustomParameters({
+    prompt: forceConsent ? 'consent select_account' : 'select_account',
+  });
   return provider;
 }
 
@@ -71,6 +79,23 @@ export async function signInWithGoogle(
       user: result.user,
       gmailAccessToken: cachedGmailAccessToken,
     };
+  } catch (err: unknown) {
+    const code =
+      typeof err === 'object' && err !== null && 'code' in err
+        ? String((err as { code?: unknown }).code)
+        : '';
+    if (code === 'auth/unauthorized-domain') {
+      const host = typeof window !== 'undefined' ? window.location.hostname : 'this domain';
+      throw new Error(
+        `Domain "${host}" is not authorized for Google Sign-In in Firebase project "${firebaseConfig.projectId}". Add "${host}" to Firebase Console → Authentication → Settings → Authorized domains and Google Cloud OAuth Authorized JavaScript origins.`
+      );
+    }
+    if (code === 'auth/popup-blocked') {
+      throw new Error(
+        'Google Sign-In popup was blocked by your browser. Please allow popups for this site and try again.'
+      );
+    }
+    throw err;
   } finally {
     isSigningIn = false;
   }
