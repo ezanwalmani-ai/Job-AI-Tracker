@@ -79,7 +79,10 @@ export function FollowUpsView({
       if (
         app.applicationStatus === 'Waiting for Response' ||
         app.applicationStatus === 'Email Sent' ||
-        app.applicationStatus === 'Applied'
+        app.applicationStatus === 'Applied' ||
+        app.applicationStatus === 'Applied – Confirmed' ||
+        app.applicationStatus === 'Applied – Manually Recorded' ||
+        app.applicationStatus === 'Awaiting Confirmation'
       ) {
         map.waiting++;
       }
@@ -97,14 +100,17 @@ export function FollowUpsView({
         case 'applied_today':
           return app.dateApplied === today;
         case 'due':
-          return isFollowUpDue(app, today);
+          return isFollowUpDue(app, today) || app.applicationStatus === 'Follow-up Due';
         case 'overdue':
           return isFollowUpOverdue(app, today);
         case 'waiting':
           return (
             app.applicationStatus === 'Waiting for Response' ||
             app.applicationStatus === 'Email Sent' ||
-            app.applicationStatus === 'Applied'
+            app.applicationStatus === 'Applied' ||
+            app.applicationStatus === 'Applied – Confirmed' ||
+            app.applicationStatus === 'Applied – Manually Recorded' ||
+            app.applicationStatus === 'Awaiting Confirmation'
           );
         case 'hr_responded':
           return app.applicationStatus === 'HR Responded';

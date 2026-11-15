@@ -1,5 +1,6 @@
 import 'dotenv/config';
 import express from 'express';
+import fs from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { requireAuth, AuthRequest } from './src/server/firebaseAdmin.ts';
@@ -20,11 +21,15 @@ import {
   findCompanyHrContact,
   generateFollowUpEmail,
   classifyIncomingEmailReplies,
+  detectPortalApplicationConfirmations,
 } from './src/server/gemini.ts';
 import {
   sendGmailMessage,
   fetchRecentGmailReplies,
+  verifyGmailReadonlyProfile,
+  fetchJobConfirmationEmails,
 } from './src/server/gmailService.ts';
+import { createZipBuffer } from './src/server/zipBuilder.ts';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -555,6 +560,171 @@ async function startServer() {
       console.error('Gmail reply sync error:', error);
       const message = error instanceof Error ? error.message : 'Failed to sync Gmail replies.';
       res.status(502).json({ error: message });
+    }
+  });
+
+  // 8. Verify read-only Gmail access for portal confirmation detection
+  app.post('/api/gmail/verify-readonly', requireAuth, async (req: AuthRequest, res) => {
+    try {
+      const gmailToken = req.headers['x-gmail-token'];
+      if (!gmailToken || typeof gmailToken !== 'string') {
+        res.status(401).json({
+          error: 'Gmail read-only authorization token is missing. Authorize read-only Gmail access first.',
+        });
+        return;
+      }
+
+      const profile = await verifyGmailReadonlyProfile(gmailToken);
+      res.json({
+        ok: true,
+        emailAddress: profile.emailAddress,
+        messagesTotal: profile.messagesTotal,
+        verifiedAt: new Date().toISOString(),
+      });
+    } catch (error: unknown) {
+      console.error('Gmail verify-readonly error:', error);
+      const message =
+        error instanceof Error ? error.message : 'Failed to verify read-only Gmail connection.';
+      res.status(502).json({ error: message });
+    }
+  });
+
+  // 9. Scan Gmail for job portal & ATS application submission confirmations
+  app.post('/api/gmail/scan-confirmations', requireAuth, async (req: AuthRequest, res) => {
+    try {
+      const gmailToken = req.headers['x-gmail-token'];
+      if (!gmailToken || typeof gmailToken !== 'string') {
+        res.status(401).json({
+          error: 'Gmail read-only authorization token is missing. Authorize Gmail inbox scanning first.',
+        });
+        return;
+      }
+
+      const { portalFilter, existingMessageIds } = req.body as {
+        portalFilter?: string;
+        existingMessageIds?: string[];
+      };
+
+      const candidates = await fetchJobConfirmationEmails({
+        accessToken: gmailToken,
+        userEmail: req.user?.email || '',
+        maxResults: 20,
+        portalFilter,
+      });
+
+      const knownIds = new Set(existingMessageIds || []);
+      const freshMessages = candidates.filter((m) => !knownIds.has(m.gmailMessageId));
+
+      if (freshMessages.length === 0) {
+        res.json({
+          checkedCount: candidates.length,
+          freshCount: 0,
+          confirmations: [],
+        });
+        return;
+      }
+
+      const detections = await detectPortalApplicationConfirmations({
+        messages: freshMessages,
+      });
+
+      const merged = freshMessages.map((msg) => {
+        const det = detections.find((d) => d.gmailMessageId === msg.gmailMessageId);
+        return {
+          gmailMessageId: msg.gmailMessageId,
+          gmailThreadId: msg.gmailThreadId,
+          fromEmail: msg.fromEmail,
+          fromName: msg.fromName,
+          subject: msg.subject,
+          snippet: msg.snippet,
+          receivedAt: msg.receivedAt,
+          isConfirmedApplication: det?.isConfirmedApplication ?? false,
+          confidence: det?.confidence ?? 'not_application',
+          companyName: det?.companyName ?? '',
+          jobTitle: det?.jobTitle ?? '',
+          jobLocation: det?.jobLocation ?? '',
+          jobUrl: det?.jobUrl ?? '',
+          applicationSource: det?.applicationSource ?? '',
+          applicationDate: det?.applicationDate || msg.receivedAt.slice(0, 10),
+          confirmationMessage: det?.confirmationMessage ?? '',
+          recruiterName: det?.recruiterName ?? '',
+          recruiterEmail: det?.recruiterEmail ?? '',
+        };
+      });
+
+      res.json({
+        checkedCount: candidates.length,
+        freshCount: freshMessages.length,
+        confirmations: merged,
+      });
+    } catch (error: unknown) {
+      console.error('Gmail scan-confirmations error:', error);
+      const message =
+        error instanceof Error ? error.message : 'Failed to scan Gmail for application confirmations.';
+      res.status(502).json({ error: message });
+    }
+  });
+
+  // 10. Download Chrome Extension ZIP bundle (preconfigured with current app URL & public Firebase project info)
+  app.get('/api/extension/download.zip', async (req, res) => {
+    try {
+      const extDir = path.join(__dirname, 'chrome-extension');
+      const fileNames = [
+        'manifest.json',
+        'background.js',
+        'content.js',
+        'popup.html',
+        'popup.css',
+        'popup.js',
+        'README.txt',
+      ];
+
+      const entries = await Promise.all(
+        fileNames.map(async (name) => ({
+          name: `save-to-my-job-tracker/${name}`,
+          content: await fs.readFile(path.join(extDir, name)),
+        }))
+      );
+
+      let fbConfig: { apiKey?: string; projectId?: string; firestoreDatabaseId?: string } = {};
+      try {
+        const rawCfg = await fs.readFile(path.join(__dirname, 'firebase-applet-config.json'), 'utf8');
+        fbConfig = JSON.parse(rawCfg) as typeof fbConfig;
+      } catch {
+        // optional
+      }
+
+      const forwardedProto = (req.headers['x-forwarded-proto'] as string | undefined)?.split(',')[0]?.trim();
+      const protocol = forwardedProto || req.protocol || 'https';
+      const host = req.get('host');
+      const resolvedAppUrl = (
+        process.env.APP_URL ||
+        (host ? `${protocol}://${host}` : 'https://jobaitracker.netlify.app')
+      ).replace(/\/+$/, '');
+
+      const defaultConfig = {
+        appUrl: resolvedAppUrl,
+        apiKey: fbConfig.apiKey || '',
+        projectId: fbConfig.projectId || '',
+        databaseId: fbConfig.firestoreDatabaseId || '(default)',
+      };
+
+      entries.push({
+        name: 'save-to-my-job-tracker/default-config.json',
+        content: Buffer.from(JSON.stringify(defaultConfig, null, 2), 'utf8'),
+      });
+
+      const zipBuf = createZipBuffer(entries);
+      res.setHeader('Content-Type', 'application/zip');
+      res.setHeader(
+        'Content-Disposition',
+        'attachment; filename="save-to-my-job-tracker-extension.zip"'
+      );
+      res.setHeader('Content-Length', String(zipBuf.length));
+      res.send(zipBuf);
+    } catch (error: unknown) {
+      console.error('Extension ZIP download error:', error);
+      res.status(500).json({ error: 'Failed to package Chrome extension archive.' });
     }
   });
 

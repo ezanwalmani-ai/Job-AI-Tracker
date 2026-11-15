@@ -198,3 +198,48 @@ export function syncGmailRepliesApi(payload: {
     }>;
   }>('/api/gmail/sync-replies', payload, { includeGmailToken: true });
 }
+
+export function verifyGmailReadonlyApi() {
+  return apiRequest<{
+    ok: boolean;
+    emailAddress: string;
+    messagesTotal: number;
+    verifiedAt: string;
+  }>('/api/gmail/verify-readonly', {}, { includeGmailToken: true });
+}
+
+export interface ScannedConfirmationItem {
+  gmailMessageId: string;
+  gmailThreadId: string;
+  fromEmail: string;
+  fromName: string;
+  subject: string;
+  snippet: string;
+  receivedAt: string;
+  isConfirmedApplication: boolean;
+  confidence: 'high' | 'incomplete' | 'not_application';
+  companyName: string;
+  jobTitle: string;
+  jobLocation: string;
+  jobUrl: string;
+  applicationSource: string;
+  applicationDate: string;
+  confirmationMessage: string;
+  recruiterName: string;
+  recruiterEmail: string;
+}
+
+export function scanGmailConfirmationsApi(payload: {
+  portalFilter?: string;
+  existingMessageIds: string[];
+}) {
+  return apiRequest<{
+    checkedCount: number;
+    freshCount: number;
+    confirmations: ScannedConfirmationItem[];
+  }>('/api/gmail/scan-confirmations', payload, { includeGmailToken: true });
+}
+
+export function getExtensionDownloadUrl(): string {
+  return `${API_BASE}/api/extension/download.zip`;
+}

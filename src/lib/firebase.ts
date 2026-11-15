@@ -101,6 +101,61 @@ export async function signInWithGoogle(
   }
 }
 
+export const GMAIL_READONLY_SCOPE = 'https://www.googleapis.com/auth/gmail.readonly';
+
+export async function signInWithGmailReadonly(): Promise<{
+  user: User;
+  gmailAccessToken: string | null;
+}> {
+  isSigningIn = true;
+  try {
+    const provider = new GoogleAuthProvider();
+    provider.addScope(GMAIL_READONLY_SCOPE);
+    provider.setCustomParameters({
+      prompt: 'consent select_account',
+    });
+    const result = await signInWithPopup(auth, provider);
+    const credential = GoogleAuthProvider.credentialFromResult(result);
+    if (credential?.accessToken) {
+      cachedGmailAccessToken = credential.accessToken;
+    }
+    return {
+      user: result.user,
+      gmailAccessToken: cachedGmailAccessToken,
+    };
+  } finally {
+    isSigningIn = false;
+  }
+}
+
+export function exportExtensionPairingConfig(
+  uid: string,
+  email: string,
+  defaultFollowUpDays = 7
+): string {
+  const user = auth.currentUser;
+  if (!user || !user.refreshToken) {
+    throw new Error('Sign in with Google first to generate a pairing code for the browser extension.');
+  }
+  const payload = {
+    uid,
+    email,
+    refreshToken: user.refreshToken,
+    apiKey: firebaseConfig.apiKey,
+    projectId: firebaseConfig.projectId,
+    databaseId: firebaseConfig.firestoreDatabaseId || '(default)',
+    appUrl: typeof window !== 'undefined' ? window.location.origin : 'https://jobaitracker.netlify.app',
+    defaultFollowUpDays,
+  };
+  const bytes = new TextEncoder().encode(JSON.stringify(payload));
+  let bin = '';
+  bytes.forEach((b) => {
+    bin += String.fromCharCode(b);
+  });
+  const encoded = btoa(bin).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+  return `mjt_pair_${encoded}`;
+}
+
 export function getGmailAccessToken(): string | null {
   return cachedGmailAccessToken;
 }

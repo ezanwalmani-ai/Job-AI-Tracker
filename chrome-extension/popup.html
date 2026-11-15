@@ -1,0 +1,90 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Save to My Job Tracker</title>
+    <link rel="stylesheet" href="popup.css" />
+  </head>
+  <body>
+    <header class="hdr">
+      <div class="brand">
+        <span class="badge">JT</span>
+        <span>Save to My Job Tracker</span>
+      </div>
+      <span id="pairing-pill" class="pill pill-warn">Not Paired</span>
+    </header>
+
+    <main class="main">
+      <section class="card">
+        <div class="field-row">
+          <label for="portal">Detected Portal</label>
+          <select id="portal">
+            <option value="LinkedIn">LinkedIn</option>
+            <option value="Indeed">Indeed</option>
+            <option value="Naukri">Naukri</option>
+            <option value="WorkIndia">WorkIndia</option>
+            <option value="Apna">Apna</option>
+            <option value="Company Career Page">Company Career Page</option>
+          </select>
+        </div>
+
+        <div class="field-row">
+          <label for="company">Company Name *</label>
+          <input type="text" id="company" placeholder="Company name" />
+        </div>
+
+        <div class="field-row">
+          <label for="title">Job Title *</label>
+          <input type="text" id="title" placeholder="Role / job title" />
+        </div>
+
+        <div class="field-row">
+          <label for="location">Location</label>
+          <input type="text" id="location" placeholder="City, State" />
+        </div>
+
+        <div class="field-row">
+          <label for="url">Job Posting URL</label>
+          <input type="url" id="url" placeholder="https://..." />
+        </div>
+
+        <div class="field-row">
+          <label for="notes">Notes (optional)</label>
+          <input type="text" id="notes" placeholder="Optional referral or application note" />
+        </div>
+
+        <div class="confirm-box">
+          <label class="radio">
+            <input type="radio" name="applyChoice" value="applied" checked />
+            <span><strong>Applied – Manually Recorded</strong> (I submitted my application)</span>
+          </label>
+          <label class="radio">
+            <input type="radio" name="applyChoice" value="saved" />
+            <span><strong>Saved</strong> (Bookmark only, not applied yet)</span>
+          </label>
+        </div>
+
+        <div class="btn-row">
+          <button type="button" id="save-btn" class="btn-primary">Save to Tracker</button>
+          <button type="button" id="web-btn" class="btn-secondary">Quick-Save in Web App</button>
+        </div>
+        <p id="status-msg" class="status-msg"></p>
+      </section>
+
+      <details class="pairing-details" id="pairing-section">
+        <summary>Extension Pairing &amp; Connection Test</summary>
+        <p class="hint">
+          Paste the Pairing Code from <strong>My Job Tracker → Connected Portals</strong> (no password required).
+        </p>
+        <textarea id="pairing-code" rows="3" placeholder="Paste Pairing Code here..."></textarea>
+        <div class="btn-row">
+          <button type="button" id="pair-btn" class="btn-secondary">Save &amp; Test Pairing</button>
+        </div>
+        <p id="pairing-status" class="status-msg"></p>
+      </details>
+    </main>
+
+    <script src="popup.js"></script>
+  </body>
+</html>

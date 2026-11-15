@@ -34,6 +34,7 @@ interface EmailSettingsViewProps {
   replies: EmailReplyRecord[];
   onConnectGmail: () => Promise<boolean>;
   onDisconnectGmail: () => Promise<void>;
+  onOpenConnectedPortals?: () => void;
   onNotice: (msg: string) => void;
   onError: (msg: string) => void;
 }
@@ -48,6 +49,7 @@ export function EmailSettingsView({
   replies,
   onConnectGmail,
   onDisconnectGmail,
+  onOpenConnectedPortals,
   onNotice,
   onError,
 }: EmailSettingsViewProps) {
@@ -81,10 +83,31 @@ export function EmailSettingsView({
         connectedEmail: emailConnection?.connectedEmail || userEmail,
         status: emailConnection?.status || (hasGmailSessionToken ? 'connected' : 'disconnected'),
         replyTrackingEnabled: !(emailConnection?.replyTrackingEnabled ?? true),
+        autoProcessConfirmations: emailConnection?.autoProcessConfirmations ?? false,
       });
       onNotice('Email reply tracking preference updated.');
     } catch (err) {
       onError(err instanceof Error ? err.message : 'Failed to update reply tracking preference.');
+    }
+  };
+
+  const handleToggleAutoConfirmations = async () => {
+    try {
+      const nextVal = !(emailConnection?.autoProcessConfirmations ?? false);
+      await saveEmailConnectionState({
+        uid,
+        connectedEmail: emailConnection?.connectedEmail || userEmail,
+        status: emailConnection?.status || (hasGmailSessionToken ? 'connected' : 'disconnected'),
+        replyTrackingEnabled: emailConnection?.replyTrackingEnabled ?? true,
+        autoProcessConfirmations: nextVal,
+      });
+      onNotice(
+        nextVal
+          ? 'Automatic portal confirmation email processing enabled.'
+          : 'Automatic portal confirmation email processing disabled.'
+      );
+    } catch (err) {
+      onError(err instanceof Error ? err.message : 'Failed to update preference.');
     }
   };
 
@@ -308,12 +331,33 @@ export function EmailSettingsView({
               )}
             </div>
           </div>
-          <div className="bg-slate-50 border border-slate-200 rounded-lg p-4">
-            <p className="text-xs text-slate-500">Permissions Granted</p>
-            <p className="text-xs text-slate-700 mt-1 leading-relaxed">
-              Send emails on your click (<span className="font-mono">gmail.send</span>) and
-              optional read-only HR reply check (<span className="font-mono">gmail.readonly</span>).
+          <div className="bg-slate-50 border border-slate-200 rounded-lg p-4 space-y-2">
+            <p className="text-xs text-slate-500">Separated Permissions</p>
+            <p className="text-xs text-slate-700 leading-relaxed">
+              Send on your click (<span className="font-mono">gmail.send</span>) and read-only
+              inbox checks (<span className="font-mono">gmail.readonly</span>) for HR replies &amp;
+              portal application confirmations.
             </p>
+            <div className="pt-1 flex flex-wrap items-center justify-between gap-2">
+              <label className="inline-flex items-center gap-1.5 text-[11px] font-medium text-slate-700 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={emailConnection?.autoProcessConfirmations ?? false}
+                  onChange={() => void handleToggleAutoConfirmations()}
+                  className="rounded border-slate-300 text-blue-700"
+                />
+                <span>Auto-detect portal confirmation receipts</span>
+              </label>
+              {onOpenConnectedPortals && (
+                <button
+                  type="button"
+                  onClick={onOpenConnectedPortals}
+                  className="text-[11px] font-medium text-blue-700 hover:underline cursor-pointer"
+                >
+                  Open Connected Portals →
+                </button>
+              )}
+            </div>
           </div>
         </div>
       </div>

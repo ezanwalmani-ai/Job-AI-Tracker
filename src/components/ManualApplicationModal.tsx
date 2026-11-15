@@ -1,22 +1,26 @@
 import { useState } from 'react';
 import { X, Loader2, ChevronDown, ChevronUp } from 'lucide-react';
-import type { ApplicationStatus } from '../types.ts';
+import type { ApplicationStatus, JobApplicationRecord } from '../types.ts';
 import { addCalendarDays, getTodayIsoDate } from '../lib/dateUtils.ts';
 import { analyzeManualJdApi, parseJobInputApi } from '../lib/apiClient.ts';
 import { saveManualApplicationRecord } from '../lib/firestoreService.ts';
+import { findDuplicateApplication, normalizePortalSource } from '../lib/portalAdapters.ts';
 
 interface ManualApplicationModalProps {
   isOpen: boolean;
   uid: string;
   defaultFollowUpDays: number;
+  applications?: JobApplicationRecord[];
   onClose: () => void;
   onSaved: (message: string) => void;
 }
 
 const PORTAL_SOURCES = [
   'LinkedIn',
-  'Naukri',
   'Indeed',
+  'Naukri',
+  'WorkIndia',
+  'Apna',
   'Company Career Page',
   'Wellfound',
   'Glassdoor',
@@ -25,8 +29,10 @@ const PORTAL_SOURCES = [
 ];
 
 const MANUAL_STATUSES: ApplicationStatus[] = [
-  'Applied',
-  'Waiting for Response',
+  'Applied – Manually Recorded',
+  'Saved',
+  'Applied – Confirmed',
+  'Awaiting Confirmation',
   'HR Responded',
   'Interview Scheduled',
   'Offer Received',
@@ -37,6 +43,7 @@ export function ManualApplicationModal({
   isOpen,
   uid,
   defaultFollowUpDays,
+  applications = [],
   onClose,
   onSaved,
 }: ManualApplicationModalProps) {
@@ -50,7 +57,9 @@ export function ManualApplicationModal({
   const [applicationSource, setApplicationSource] = useState('LinkedIn');
   const [jobUrl, setJobUrl] = useState('');
   const [dateApplied, setDateApplied] = useState(getTodayIsoDate());
-  const [applicationStatus, setApplicationStatus] = useState<ApplicationStatus>('Applied');
+  const [applicationStatus, setApplicationStatus] = useState<ApplicationStatus>(
+    'Applied – Manually Recorded'
+  );
   const [notes, setNotes] = useState('');
 
   const [extracting, setExtracting] = useState(false);
@@ -69,7 +78,7 @@ export function ManualApplicationModal({
     setApplicationSource('LinkedIn');
     setJobUrl('');
     setDateApplied(getTodayIsoDate());
-    setApplicationStatus('Applied');
+    setApplicationStatus('Applied – Manually Recorded');
     setNotes('');
     setError('');
   };
@@ -161,6 +170,23 @@ export function ManualApplicationModal({
         keyRequirements = analysis.keyRequirements;
       }
 
+      const dup = findDuplicateApplication(
+        {
+          userId: uid,
+          companyName: finalCompany,
+          jobTitle: finalTitle,
+          jobUrl: finalUrl,
+          dateApplied: today,
+        },
+        applications
+      );
+      if (dup.isDuplicate) {
+        setError(`Duplicate detected: ${dup.reason}. No duplicate record was created.`);
+        setSaving(false);
+        return;
+      }
+
+      const normSource = normalizePortalSource(finalSource, finalUrl);
       await saveManualApplicationRecord({
         uid,
         companyName: finalCompany,
@@ -175,7 +201,13 @@ export function ManualApplicationModal({
         employmentType,
         requiredExperience,
         applicationInstructions,
-        applicationSource: finalSource,
+        applicationSource: normSource,
+        captureMethod: 'manual_portal',
+        confirmationEvidence:
+          applicationStatus === 'Saved'
+            ? `Bookmarked via Quick Save (${normSource})`
+            : `Recorded by user for ${normSource} on ${today}`,
+        needsReview: false,
         dateApplied: today,
         followUpDate,
         applicationStatus,

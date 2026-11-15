@@ -40,6 +40,7 @@ import {
   saveEmailApplicationRecord,
   saveManualApplicationRecord,
 } from '../lib/firestoreService.ts';
+import { normalizePortalSource } from '../lib/portalAdapters.ts';
 import { PdfCanvasViewer, PdfPreviewModal } from './PdfPreview.tsx';
 
 interface ApplyForJobViewProps {
@@ -108,8 +109,10 @@ const STAGE_LABEL: Record<ProcessingStage, string> = {
 
 const PORTAL_SOURCES = [
   'LinkedIn',
-  'Naukri',
   'Indeed',
+  'Naukri',
+  'WorkIndia',
+  'Apna',
   'Company Career Page',
   'Wellfound',
   'Glassdoor',
@@ -245,9 +248,8 @@ export function ApplyForJobView({
     setHrLookupSource(null);
     setSendError('');
     setConfirmDuplicateOverride(false);
-    setPortalSource(
-      PORTAL_SOURCES.includes(parsed.applicationSource) ? parsed.applicationSource : 'LinkedIn'
-    );
+    const detectedSource = normalizePortalSource(parsed.applicationSource, parsed.jobUrl);
+    setPortalSource(PORTAL_SOURCES.includes(detectedSource) ? detectedSource : 'LinkedIn');
 
     // Auto-detect appropriate email purpose type from parsed content
     const looksLikeHrEmail =
@@ -707,6 +709,7 @@ export function ApplyForJobView({
     try {
       const applied = portalDateApplied || getTodayIsoDate();
       const followUpDate = addCalendarDays(applied, followUpDays);
+      const normSource = normalizePortalSource(portalSource, jobUrl.trim());
       await saveManualApplicationRecord({
         uid,
         companyName: companyName.trim(),
@@ -723,10 +726,13 @@ export function ApplyForJobView({
         employmentType: employmentType.trim(),
         requiredExperience: requiredExperience.trim(),
         applicationInstructions: applicationInstructions.trim(),
-        applicationSource: portalSource,
+        applicationSource: normSource,
+        captureMethod: 'manual_portal',
+        confirmationEvidence: `User confirmed submission on ${normSource} on ${applied}`,
+        needsReview: false,
         dateApplied: applied,
         followUpDate,
-        applicationStatus: 'Applied',
+        applicationStatus: 'Applied – Manually Recorded',
         notes: portalNotes.trim(),
         aiSummary: extracted?.aiSummary || '',
         keyRequirements: extracted?.keyRequirements || [],

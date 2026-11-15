@@ -65,7 +65,7 @@
     },
     "JobApplication": {
       "title": "JobApplication",
-      "description": "Complete record of a job application sent by email or submitted via a job portal.",
+      "description": "Unified record of a job application across Gmail, job portals, Chrome extension, CSV imports, and manual entry.",
       "type": "object",
       "properties": {
         "id": { "type": "string", "maxLength": 128 },
@@ -84,12 +84,33 @@
         "applicationInstructions": { "type": "string", "maxLength": 2000 },
         "applicationSource": { "type": "string", "maxLength": 120 },
         "applicationMethod": { "type": "string", "enum": ["email", "portal"] },
+        "captureMethod": {
+          "type": "string",
+          "enum": ["web_gmail", "gmail_confirmation", "chrome_extension", "csv_import", "manual_portal"]
+        },
+        "confirmationEvidence": { "type": "string", "maxLength": 2000 },
+        "needsReview": { "type": "boolean" },
+        "gmailConfirmationMessageId": { "type": "string", "maxLength": 200 },
         "dateApplied": { "type": "string", "maxLength": 32 },
         "lastCommunicationDate": { "type": "string", "maxLength": 32 },
         "followUpDate": { "type": "string", "maxLength": 32 },
         "applicationStatus": {
           "type": "string",
-          "enum": ["Applied", "Email Sent", "Waiting for Response", "HR Responded", "Interview Scheduled", "Offer Received", "Rejected"]
+          "enum": [
+            "Discovered",
+            "Saved",
+            "Applied – Confirmed",
+            "Applied – Manually Recorded",
+            "Awaiting Confirmation",
+            "Follow-up Due",
+            "Applied",
+            "Email Sent",
+            "Waiting for Response",
+            "HR Responded",
+            "Interview Scheduled",
+            "Offer Received",
+            "Rejected"
+          ]
         },
         "notes": { "type": "string", "maxLength": 10000 },
         "aiSummary": { "type": "string", "maxLength": 2000 },
@@ -189,6 +210,7 @@
         "connectedEmail": { "type": "string", "maxLength": 320 },
         "status": { "type": "string", "enum": ["connected", "disconnected", "expired"] },
         "replyTrackingEnabled": { "type": "boolean" },
+        "autoProcessConfirmations": { "type": "boolean" },
         "lastSyncedAt": { "type": "string", "maxLength": 64 },
         "connectedAt": { "type": "string", "maxLength": 64 },
         "updatedAt": { "type": "string", "format": "date-time" }
@@ -226,6 +248,83 @@
         "fromEmail", "fromName", "subject", "snippet", "receivedAt",
         "classification", "matchConfidence", "reviewed", "createdAt"
       ]
+    },
+    "ConnectedPortal": {
+      "title": "ConnectedPortal",
+      "description": "Real verified integration state and sync audit metadata per job portal.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128 },
+        "userId": { "type": "string", "maxLength": 128 },
+        "portalId": {
+          "type": "string",
+          "enum": ["linkedin", "indeed", "naukri", "workindia", "apna", "company_career"]
+        },
+        "portalName": { "type": "string", "maxLength": 120 },
+        "status": {
+          "type": "string",
+          "enum": ["not_connected", "connected", "imported_only", "disconnected"]
+        },
+        "connectionMethod": {
+          "type": "string",
+          "enum": ["none", "gmail_confirmation", "chrome_extension", "csv_import", "manual_quick_save"]
+        },
+        "gmailDetectionEnabled": { "type": "boolean" },
+        "extensionCaptureEnabled": { "type": "boolean" },
+        "csvImportEnabled": { "type": "boolean" },
+        "lastSyncedAt": { "type": "string", "maxLength": 64 },
+        "lastSyncSummary": { "type": "string", "maxLength": 500 },
+        "lastTestedAt": { "type": "string", "maxLength": 64 },
+        "importedCount": { "type": "integer" },
+        "extensionVerifiedAt": { "type": "string", "maxLength": 64 },
+        "gmailVerifiedAt": { "type": "string", "maxLength": 64 },
+        "lastImportFileName": { "type": "string", "maxLength": 255 },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": [
+        "id", "userId", "portalId", "portalName", "status", "connectionMethod",
+        "gmailDetectionEnabled", "extensionCaptureEnabled", "csvImportEnabled",
+        "lastSyncedAt", "lastSyncSummary", "lastTestedAt", "importedCount", "updatedAt"
+      ]
+    },
+    "GmailConfirmation": {
+      "title": "GmailConfirmation",
+      "description": "Detected job application confirmation email and pending review metadata.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128 },
+        "userId": { "type": "string", "maxLength": 128 },
+        "gmailMessageId": { "type": "string", "maxLength": 200 },
+        "gmailThreadId": { "type": "string", "maxLength": 200 },
+        "fromEmail": { "type": "string", "maxLength": 320 },
+        "subject": { "type": "string", "maxLength": 500 },
+        "snippet": { "type": "string", "maxLength": 4000 },
+        "receivedAt": { "type": "string", "maxLength": 64 },
+        "isConfirmedApplication": { "type": "boolean" },
+        "confidence": { "type": "string", "enum": ["high", "incomplete", "not_application"] },
+        "companyName": { "type": "string", "maxLength": 200 },
+        "jobTitle": { "type": "string", "maxLength": 200 },
+        "jobLocation": { "type": "string", "maxLength": 200 },
+        "jobUrl": { "type": "string", "maxLength": 2000 },
+        "applicationSource": { "type": "string", "maxLength": 120 },
+        "applicationDate": { "type": "string", "maxLength": 32 },
+        "confirmationMessage": { "type": "string", "maxLength": 2000 },
+        "recruiterName": { "type": "string", "maxLength": 200 },
+        "recruiterEmail": { "type": "string", "maxLength": 320 },
+        "reviewStatus": {
+          "type": "string",
+          "enum": ["imported", "pending_review", "dismissed", "duplicate_skipped"]
+        },
+        "linkedApplicationId": { "type": "string", "maxLength": 128 },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": [
+        "id", "userId", "gmailMessageId", "gmailThreadId", "fromEmail", "subject",
+        "snippet", "receivedAt", "isConfirmedApplication", "confidence", "companyName",
+        "jobTitle", "jobLocation", "jobUrl", "applicationSource", "applicationDate",
+        "confirmationMessage", "recruiterName", "recruiterEmail", "reviewStatus",
+        "linkedApplicationId", "createdAt"
+      ]
     }
   },
   "firestore": {
@@ -243,7 +342,7 @@
     },
     "/users/{userId}/jobApplications/{applicationId}": {
       "schema": { "$ref": "#/entities/JobApplication" },
-      "description": "Job application records across email and portal methods."
+      "description": "Unified job application records across email, job portals, Chrome extension, CSV imports, and Gmail confirmations."
     },
     "/users/{userId}/applicationResumes/{appResumeId}": {
       "schema": { "$ref": "#/entities/ApplicationResume" },
@@ -268,6 +367,14 @@
     "/users/{userId}/emailReplies/{replyId}": {
       "schema": { "$ref": "#/entities/EmailReply" },
       "description": "Incoming HR email replies matched or awaiting review."
+    },
+    "/users/{userId}/connectedPortals/{portalId}": {
+      "schema": { "$ref": "#/entities/ConnectedPortal" },
+      "description": "Verified integration connections and sync history per job portal."
+    },
+    "/users/{userId}/gmailConfirmations/{confirmationId}": {
+      "schema": { "$ref": "#/entities/GmailConfirmation" },
+      "description": "Detected job application confirmation emails from Gmail and pending review records."
     }
   }
 }

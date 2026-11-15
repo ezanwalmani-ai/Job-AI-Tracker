@@ -1,4 +1,5 @@
 import { FileCheck2, Mail, CalendarClock, ShieldCheck } from 'lucide-react';
+import { BrandLogo } from './BrandLogo.tsx';
 
 interface SignInScreenProps {
   onSignIn: () => void;
@@ -16,12 +17,17 @@ export function SignInScreen({
       <div className="max-w-4xl mx-auto w-full grid grid-cols-1 lg:grid-cols-12 gap-8 items-center">
         <div className="lg:col-span-7 space-y-6">
           <div>
-            <p className="text-xs font-medium text-blue-700 tracking-wide">
-              Personal Job Application Workspace
-            </p>
-            <h1 className="text-3xl sm:text-4xl font-semibold text-slate-900 mt-2 tracking-tight text-balance">
-              My Job Tracker
-            </h1>
+            <div className="flex items-center gap-3.5">
+              <BrandLogo size={44} />
+              <div>
+                <p className="text-xs font-medium text-blue-700 tracking-wide">
+                  Personal Job Application Workspace
+                </p>
+                <h1 className="text-3xl sm:text-4xl font-semibold text-slate-900 tracking-tight text-balance">
+                  My Job Tracker
+                </h1>
+              </div>
+            </div>
             <p className="text-base text-slate-600 mt-3 leading-relaxed max-w-xl">
               Upload your master resume once, prepare location-specific PDF applications, send
               personalized emails through your Gmail account, and keep every follow-up on schedule.

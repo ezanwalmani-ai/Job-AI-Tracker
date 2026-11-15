@@ -14,13 +14,17 @@ import {
   CheckCircle2,
   AlertCircle,
   Loader2,
+  Link2,
 } from 'lucide-react';
 import type {
   ApplicationEmailRecord,
   ApplicationResumeRecord,
+  ConnectedPortalRecord,
   EmailConnectionRecord,
   EmailReplyRecord,
+  ExtensionCapturePayload,
   FollowUpRecord,
+  GmailConfirmationRecord,
   JobApplicationRecord,
   ResumeRecord,
   UserProfile,
@@ -35,24 +39,35 @@ import {
 import {
   ensureUserProfile,
   saveEmailConnectionState,
+  saveManualApplicationRecord,
   subscribeCollection,
   subscribeUserProfile,
+  upsertConnectedPortalState,
 } from './lib/firestoreService.ts';
+import { addCalendarDays, getTodayIsoDate } from './lib/dateUtils.ts';
+import {
+  findDuplicateApplication,
+  mapSourceToPortalId,
+  normalizePortalSource,
+} from './lib/portalAdapters.ts';
 import { SignInScreen } from './components/SignInScreen.tsx';
 import { DashboardView } from './components/DashboardView.tsx';
 import { MyResumeView } from './components/MyResumeView.tsx';
 import { ApplyForJobView } from './components/ApplyForJobView.tsx';
+import { ConnectedPortalsView } from './components/ConnectedPortalsView.tsx';
 import { MyApplicationsView } from './components/MyApplicationsView.tsx';
 import { FollowUpsView } from './components/FollowUpsView.tsx';
 import { EmailSettingsView } from './components/EmailSettingsView.tsx';
 import { ManualApplicationModal } from './components/ManualApplicationModal.tsx';
 import { ApplicationDetailModal } from './components/ApplicationDetailModal.tsx';
 import { FollowUpModal } from './components/FollowUpModal.tsx';
+import { BrandLogo } from './components/BrandLogo.tsx';
 
-type NavTab =
+export type NavTab =
   | 'dashboard'
   | 'resume'
   | 'apply'
+  | 'portals'
   | 'applications'
   | 'followups'
   | 'settings';
@@ -61,6 +76,7 @@ const NAV_ITEMS: Array<{ key: NavTab; label: string; icon: typeof LayoutDashboar
   { key: 'dashboard', label: 'Dashboard', icon: LayoutDashboard },
   { key: 'resume', label: 'My Resume', icon: FileText },
   { key: 'apply', label: 'Apply for a Job', icon: Send },
+  { key: 'portals', label: 'Connected Portals', icon: Link2 },
   { key: 'applications', label: 'My Applications', icon: Briefcase },
   { key: 'followups', label: 'Follow-ups', icon: CalendarClock },
   { key: 'settings', label: 'Email Settings', icon: Settings },
@@ -84,6 +100,9 @@ export default function App() {
   const [followUps, setFollowUps] = useState<FollowUpRecord[]>([]);
   const [emailConnections, setEmailConnections] = useState<EmailConnectionRecord[]>([]);
   const [emailReplies, setEmailReplies] = useState<EmailReplyRecord[]>([]);
+  const [connectedPortals, setConnectedPortals] = useState<ConnectedPortalRecord[]>([]);
+  const [gmailConfirmations, setGmailConfirmations] = useState<GmailConfirmationRecord[]>([]);
+  const [applicationsPortalFilter, setApplicationsPortalFilter] = useState('All');
 
   const [notice, setNotice] = useState('');
   const [errorBanner, setErrorBanner] = useState('');
@@ -111,6 +130,8 @@ export default function App() {
       setFollowUps([]);
       setEmailConnections([]);
       setEmailReplies([]);
+      setConnectedPortals([]);
+      setGmailConfirmations([]);
       return;
     }
 
@@ -167,6 +188,19 @@ export default function App() {
         (d) => !cancelled && setEmailReplies(d),
         onDbErr
       ),
+      subscribeCollection<ConnectedPortalRecord>(
+        user.uid,
+        'connectedPortals',
+        (d) => !cancelled && setConnectedPortals(d),
+        onDbErr,
+        'updatedAt'
+      ),
+      subscribeCollection<GmailConfirmationRecord>(
+        user.uid,
+        'gmailConfirmations',
+        (d) => !cancelled && setGmailConfirmations(d),
+        onDbErr
+      ),
     ];
 
     return () => {
@@ -180,6 +214,106 @@ export default function App() {
     const timer = setTimeout(() => setNotice(''), 6000);
     return () => clearTimeout(timer);
   }, [notice]);
+
+  // Handle ?extCapture=<base64url> fallback handoff from the Chrome Extension
+  useEffect(() => {
+    if (!user || typeof window === 'undefined') return;
+    const params = new URLSearchParams(window.location.search);
+    const rawExt = params.get('extCapture');
+    if (!rawExt) return;
+
+    const cleanUrl = () => {
+      params.delete('extCapture');
+      const qs = params.toString();
+      window.history.replaceState(
+        {},
+        '',
+        `${window.location.pathname}${qs ? `?${qs}` : ''}`
+      );
+    };
+
+    try {
+      const padded = rawExt.replace(/-/g, '+').replace(/_/g, '/');
+      const bin = atob(padded);
+      const bytes = Uint8Array.from(bin, (c) => c.charCodeAt(0));
+      const payload = JSON.parse(new TextDecoder().decode(bytes)) as ExtensionCapturePayload;
+      cleanUrl();
+
+      if (!payload.companyName || !payload.jobTitle) {
+        setErrorBanner('Extension capture did not include both Company Name and Job Title.');
+        return;
+      }
+
+      const normSource = normalizePortalSource(payload.portalName, payload.jobUrl);
+      const dup = findDuplicateApplication(
+        {
+          userId: user.uid,
+          companyName: payload.companyName,
+          jobTitle: payload.jobTitle,
+          jobUrl: payload.jobUrl,
+          dateApplied: getTodayIsoDate(),
+        },
+        applications
+      );
+
+      if (dup.isDuplicate) {
+        setNotice(`Skipped duplicate extension capture: ${dup.reason}.`);
+        setActiveTab('applications');
+        return;
+      }
+
+      const today = getTodayIsoDate();
+      const status = payload.didApply ? 'Applied – Manually Recorded' : 'Saved';
+      const followUpDate = addCalendarDays(today, profile?.defaultFollowUpDays ?? 7);
+
+      void saveManualApplicationRecord({
+        uid: user.uid,
+        companyName: payload.companyName,
+        jobTitle: payload.jobTitle,
+        jobDescription:
+          payload.jobDescription || `${payload.jobTitle} at ${payload.companyName}`,
+        jobLocation: payload.jobLocation || 'Not specified',
+        jobUrl: payload.jobUrl || '',
+        applicationSource: normSource,
+        captureMethod: 'chrome_extension',
+        confirmationEvidence: payload.didApply
+          ? `User confirmed application on ${normSource} via Chrome Extension`
+          : `Saved from ${normSource} via Chrome Extension`,
+        needsReview: false,
+        dateApplied: today,
+        followUpDate,
+        applicationStatus: status,
+        notes: '',
+        aiSummary: `Captured from ${normSource} via Chrome Extension (${status}).`,
+        keyRequirements: [],
+      }).then(async () => {
+        const portalId = mapSourceToPortalId(normSource);
+        if (portalId) {
+          const nowIso = new Date().toISOString();
+          await upsertConnectedPortalState({
+            uid: user.uid,
+            portalId,
+            updates: {
+              status: 'connected',
+              connectionMethod: 'chrome_extension',
+              extensionCaptureEnabled: true,
+              extensionVerifiedAt: nowIso,
+              lastTestedAt: nowIso,
+              lastSyncedAt: nowIso,
+              lastSyncSummary: `Extension captured "${payload.jobTitle}" at ${payload.companyName} (${status})`,
+            },
+          });
+        }
+        setNotice(
+          `Saved "${payload.jobTitle}" at ${payload.companyName} (${status}) from ${normSource}.`
+        );
+        setActiveTab('applications');
+      });
+    } catch {
+      cleanUrl();
+      setErrorBanner('Could not decode captured job payload from browser extension.');
+    }
+  }, [user?.uid]);
 
   const handleSignIn = async () => {
     setSigningIn(true);
@@ -250,7 +384,32 @@ export default function App() {
     }
   };
 
+  useEffect(() => {
+    if (!mobileMenuOpen) return;
+
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        setMobileMenuOpen(false);
+      }
+    };
+
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = 'hidden';
+    window.addEventListener('keydown', handleKeyDown);
+
+    return () => {
+      document.body.style.overflow = previousOverflow;
+      window.removeEventListener('keydown', handleKeyDown);
+    };
+  }, [mobileMenuOpen]);
+
+  const handleMobileNavigate = (tab: NavTab) => {
+    setMobileMenuOpen(false);
+    setActiveTab(tab);
+  };
+
   const handleSignOut = async () => {
+    setMobileMenuOpen(false);
     await signOutUser();
     setUser(null);
     setHasGmailToken(false);
@@ -273,10 +432,11 @@ export default function App() {
 
   if (!authReady) {
     return (
-      <div className="min-h-screen bg-slate-50 flex items-center justify-center">
-        <div className="flex items-center gap-2.5 text-sm text-slate-600">
-          <Loader2 className="w-5 h-5 animate-spin text-blue-700" />
-          <span>Loading workspace...</span>
+      <div className="min-h-screen bg-slate-50 flex flex-col items-center justify-center gap-4">
+        <BrandLogo size={48} />
+        <div className="flex items-center gap-2 text-sm font-medium text-slate-700">
+          <Loader2 className="w-4 h-4 animate-spin text-blue-700" />
+          <span>My Job Tracker</span>
         </div>
       </div>
     );
@@ -296,8 +456,9 @@ export default function App() {
     <div className="min-h-screen bg-slate-50 flex">
       {/* Desktop Sidebar */}
       <aside className="hidden lg:flex lg:flex-col lg:w-64 lg:fixed lg:inset-y-0 bg-white border-r border-slate-200">
-        <div className="h-16 px-5 flex items-center border-b border-slate-200">
-          <span className="text-base font-bold tracking-tight text-slate-900 whitespace-nowrap">
+        <div className="h-16 px-5 flex items-center gap-2.5 border-b border-slate-200">
+          <BrandLogo size={28} />
+          <span className="text-base font-bold tracking-tight text-slate-900 whitespace-nowrap shrink-0">
             My Job Tracker
           </span>
         </div>
@@ -344,24 +505,34 @@ export default function App() {
 
       {/* Mobile Drawer */}
       {mobileMenuOpen && (
-        <div className="fixed inset-0 z-50 lg:hidden flex">
+        <div
+          id="mobile-nav-drawer"
+          role="dialog"
+          aria-modal="true"
+          aria-label="Navigation menu"
+          className="fixed inset-0 z-50 lg:hidden flex"
+        >
           <div
-            className="fixed inset-0 bg-slate-900/40"
+            className="fixed inset-0 bg-slate-900/40 animate-drawer-backdrop-in"
             onClick={() => setMobileMenuOpen(false)}
+            aria-hidden="true"
           />
-          <aside className="relative w-64 max-w-[80vw] bg-white border-r border-slate-200 flex flex-col z-10">
+          <aside className="relative w-72 max-w-[82vw] bg-white border-r border-slate-200 shadow-xl flex flex-col z-10 animate-drawer-slide-in">
             <div className="h-16 px-5 flex items-center justify-between border-b border-slate-200">
-              <span className="text-base font-bold text-slate-900">My Job Tracker</span>
+              <div className="flex items-center gap-2.5 min-w-0">
+                <BrandLogo size={26} />
+                <span className="text-base font-bold text-slate-900 whitespace-nowrap truncate">My Job Tracker</span>
+              </div>
               <button
                 type="button"
                 onClick={() => setMobileMenuOpen(false)}
-                className="p-1.5 text-slate-500 hover:text-slate-900 rounded-lg"
+                className="inline-flex items-center justify-center min-w-[40px] min-h-[40px] -mr-2 text-slate-500 hover:text-slate-900 hover:bg-slate-100 rounded-lg cursor-pointer transition-colors"
                 aria-label="Close navigation"
               >
                 <X className="w-4 h-4" />
               </button>
             </div>
-            <nav className="flex-1 px-3 py-4 space-y-1">
+            <nav className="flex-1 px-3 py-4 space-y-1 overflow-y-auto">
               {NAV_ITEMS.map((item) => {
                 const Icon = item.icon;
                 const active = activeTab === item.key;
@@ -369,11 +540,8 @@ export default function App() {
                   <button
                     key={item.key}
                     type="button"
-                    onClick={() => {
-                      setActiveTab(item.key);
-                      setMobileMenuOpen(false);
-                    }}
-                    className={`w-full flex items-center gap-3 px-3 py-2.5 text-sm font-medium rounded-lg cursor-pointer ${
+                    onClick={() => handleMobileNavigate(item.key)}
+                    className={`w-full flex items-center gap-3 px-3.5 min-h-[44px] py-2.5 text-sm font-medium rounded-lg cursor-pointer transition-colors whitespace-nowrap ${
                       active
                         ? 'bg-blue-50 text-blue-800'
                         : 'text-slate-600 hover:bg-slate-100 hover:text-slate-900'
@@ -385,12 +553,17 @@ export default function App() {
                 );
               })}
             </nav>
-            <div className="p-4 border-t border-slate-200 space-y-2">
-              <p className="text-xs text-slate-600 truncate">{user.email}</p>
+            <div className="p-4 border-t border-slate-200 space-y-2.5">
+              <div className="min-w-0">
+                <p className="text-xs font-medium text-slate-900 truncate">
+                  {profile?.displayName || user.displayName || 'Candidate'}
+                </p>
+                <p className="text-xs text-slate-500 truncate">{user.email}</p>
+              </div>
               <button
                 type="button"
                 onClick={handleSignOut}
-                className="w-full inline-flex items-center justify-center gap-2 px-3 py-2 text-xs font-medium text-slate-700 border border-slate-300 rounded-lg"
+                className="w-full inline-flex items-center justify-center gap-2 px-3 min-h-[40px] py-2 text-xs font-medium text-slate-700 border border-slate-300 rounded-lg hover:bg-slate-50 cursor-pointer transition-colors"
               >
                 <LogOut className="w-3.5 h-3.5" />
                 Sign Out
@@ -408,8 +581,10 @@ export default function App() {
             <button
               type="button"
               onClick={() => setMobileMenuOpen(true)}
-              className="lg:hidden p-2 -ml-2 text-slate-600 hover:text-slate-900 rounded-lg"
+              className="lg:hidden inline-flex items-center justify-center min-w-[40px] min-h-[40px] -ml-2 text-slate-600 hover:text-slate-900 hover:bg-slate-100 rounded-lg cursor-pointer transition-colors"
               aria-label="Open menu"
+              aria-expanded={mobileMenuOpen}
+              aria-controls="mobile-nav-drawer"
             >
               <Menu className="w-5 h-5" />
             </button>
@@ -488,7 +663,16 @@ export default function App() {
               emailConnection={emailConnection}
               hasGmailSessionToken={hasGmailToken}
               replies={emailReplies}
+              pendingConfirmationsCount={
+                gmailConfirmations.filter(
+                  (c) => c.isConfirmedApplication && c.reviewStatus === 'pending_review'
+                ).length
+              }
               onNavigate={setActiveTab}
+              onNavigateApplicationsWithPortal={(portalName) => {
+                setApplicationsPortalFilter(portalName);
+                setActiveTab('applications');
+              }}
               onOpenManualModal={() => setShowManualModal(true)}
               onSelectApplication={(app) => setSelectedAppId(app.id)}
               onTriggerFollowUp={(app) => setFollowUpApp(app)}
@@ -523,9 +707,29 @@ export default function App() {
             />
           )}
 
+          {activeTab === 'portals' && (
+            <ConnectedPortalsView
+              uid={user.uid}
+              userEmail={user.email || ''}
+              defaultFollowUpDays={defaultFollowUpDays}
+              applications={applications}
+              connectedPortals={connectedPortals}
+              gmailConfirmations={gmailConfirmations}
+              emailConnection={emailConnection}
+              hasGmailSessionToken={hasGmailToken}
+              onRefreshGmailState={(hasToken) => setHasGmailToken(hasToken)}
+              onSelectApplication={(app) => setSelectedAppId(app.id)}
+              onNavigateToApply={() => setActiveTab('apply')}
+              onNotice={setNotice}
+              onError={setErrorBanner}
+            />
+          )}
+
           {activeTab === 'applications' && (
             <MyApplicationsView
               applications={applications}
+              portalFilter={applicationsPortalFilter}
+              onPortalFilterChange={setApplicationsPortalFilter}
               onOpenManualModal={() => setShowManualModal(true)}
               onSelectApplication={(app) => setSelectedAppId(app.id)}
               onTriggerFollowUp={(app) => setFollowUpApp(app)}
@@ -556,6 +760,7 @@ export default function App() {
               replies={emailReplies}
               onConnectGmail={handleReconnectGmail}
               onDisconnectGmail={handleDisconnectGmail}
+              onOpenConnectedPortals={() => setActiveTab('portals')}
               onNotice={setNotice}
               onError={setErrorBanner}
             />
@@ -568,6 +773,7 @@ export default function App() {
         isOpen={showManualModal}
         uid={user.uid}
         defaultFollowUpDays={defaultFollowUpDays}
+        applications={applications}
         onClose={() => setShowManualModal(false)}
         onSaved={(msg) => setNotice(msg)}
       />

@@ -1,0 +1,40 @@
+{
+  "manifest_version": 3,
+  "name": "Save to My Job Tracker",
+  "version": "1.0.0",
+  "description": "Save visible job details from LinkedIn, Indeed, Naukri, WorkIndia, Apna, and company career pages to My Job Tracker after you confirm.",
+  "permissions": [
+    "activeTab",
+    "storage",
+    "scripting"
+  ],
+  "host_permissions": [
+    "https://*.linkedin.com/*",
+    "https://*.indeed.com/*",
+    "https://*.naukri.com/*",
+    "https://*.workindia.in/*",
+    "https://*.apna.co/*",
+    "https://securetoken.googleapis.com/*",
+    "https://firestore.googleapis.com/*"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "Save to My Job Tracker"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://*.linkedin.com/*",
+        "https://*.indeed.com/*",
+        "https://*.naukri.com/*",
+        "https://*.workindia.in/*",
+        "https://*.apna.co/*"
+      ],
+      "js": ["content.js"],
+      "run_at": "document_idle"
+    }
+  ]
+}

@@ -86,6 +86,12 @@ service cloud.firestore {
 
     function isValidApplicationStatus(status) {
       return status in [
+        'Discovered',
+        'Saved',
+        'Applied – Confirmed',
+        'Applied – Manually Recorded',
+        'Awaiting Confirmation',
+        'Follow-up Due',
         'Applied',
         'Email Sent',
         'Waiting for Response',
@@ -108,10 +114,11 @@ service cloud.firestore {
           'id', 'userId', 'companyName', 'jobTitle', 'jobDescription', 'jobLocation',
           'jobUrl', 'hrEmail', 'recruiterName', 'companyAddress', 'salary',
           'employmentType', 'requiredExperience', 'applicationInstructions',
-          'applicationSource', 'applicationMethod', 'dateApplied',
-          'lastCommunicationDate', 'followUpDate', 'applicationStatus', 'notes',
-          'aiSummary', 'keyRequirements', 'applicationResumeId', 'gmailThreadId',
-          'createdAt', 'updatedAt'
+          'applicationSource', 'applicationMethod', 'captureMethod',
+          'confirmationEvidence', 'needsReview', 'gmailConfirmationMessageId',
+          'dateApplied', 'lastCommunicationDate', 'followUpDate', 'applicationStatus',
+          'notes', 'aiSummary', 'keyRequirements', 'applicationResumeId',
+          'gmailThreadId', 'createdAt', 'updatedAt'
         ])
         && data.id == applicationId
         && data.userId == userId
@@ -127,6 +134,10 @@ service cloud.firestore {
         && (!('employmentType' in data) || (data.employmentType is string && data.employmentType.size() <= 100))
         && (!('requiredExperience' in data) || (data.requiredExperience is string && data.requiredExperience.size() <= 300))
         && (!('applicationInstructions' in data) || (data.applicationInstructions is string && data.applicationInstructions.size() <= 2000))
+        && (!('captureMethod' in data) || (data.captureMethod in ['web_gmail', 'gmail_confirmation', 'chrome_extension', 'csv_import', 'manual_portal']))
+        && (!('confirmationEvidence' in data) || (data.confirmationEvidence is string && data.confirmationEvidence.size() <= 2000))
+        && (!('needsReview' in data) || (data.needsReview is bool))
+        && (!('gmailConfirmationMessageId' in data) || (data.gmailConfirmationMessageId is string && data.gmailConfirmationMessageId.size() <= 200))
         && data.applicationSource is string && data.applicationSource.size() <= 120
         && data.applicationMethod in ['email', 'portal']
         && data.dateApplied is string && data.dateApplied.size() <= 32
@@ -223,7 +234,7 @@ service cloud.firestore {
         ])
         && data.keys().hasOnly([
           'id', 'userId', 'provider', 'connectedEmail', 'status',
-          'replyTrackingEnabled', 'lastSyncedAt', 'connectedAt', 'updatedAt'
+          'replyTrackingEnabled', 'autoProcessConfirmations', 'lastSyncedAt', 'connectedAt', 'updatedAt'
         ])
         && data.id == connectionId
         && data.userId == userId
@@ -231,6 +242,7 @@ service cloud.firestore {
         && data.connectedEmail is string && data.connectedEmail.size() <= 320
         && data.status in ['connected', 'disconnected', 'expired']
         && data.replyTrackingEnabled is bool
+        && (!('autoProcessConfirmations' in data) || (data.autoProcessConfirmations is bool))
         && data.lastSyncedAt is string && data.lastSyncedAt.size() <= 64
         && data.connectedAt is string && data.connectedAt.size() <= 64
         && data.updatedAt is timestamp;
@@ -266,6 +278,76 @@ service cloud.firestore {
         ]
         && data.matchConfidence in ['high', 'needs_review']
         && data.reviewed is bool
+        && data.createdAt is timestamp;
+    }
+
+    function isValidConnectedPortal(data, userId, portalDocId) {
+      return data.keys().hasAll([
+          'id', 'userId', 'portalId', 'portalName', 'status', 'connectionMethod',
+          'gmailDetectionEnabled', 'extensionCaptureEnabled', 'csvImportEnabled',
+          'lastSyncedAt', 'lastSyncSummary', 'lastTestedAt', 'importedCount', 'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'id', 'userId', 'portalId', 'portalName', 'status', 'connectionMethod',
+          'gmailDetectionEnabled', 'extensionCaptureEnabled', 'csvImportEnabled',
+          'lastSyncedAt', 'lastSyncSummary', 'lastTestedAt', 'importedCount',
+          'extensionVerifiedAt', 'gmailVerifiedAt', 'lastImportFileName', 'updatedAt'
+        ])
+        && data.id == portalDocId
+        && data.userId == userId
+        && data.portalId in ['linkedin', 'indeed', 'naukri', 'workindia', 'apna', 'company_career']
+        && data.portalName is string && data.portalName.size() >= 1 && data.portalName.size() <= 120
+        && data.status in ['not_connected', 'connected', 'imported_only', 'disconnected']
+        && data.connectionMethod in ['none', 'gmail_confirmation', 'chrome_extension', 'csv_import', 'manual_quick_save']
+        && data.gmailDetectionEnabled is bool
+        && data.extensionCaptureEnabled is bool
+        && data.csvImportEnabled is bool
+        && data.lastSyncedAt is string && data.lastSyncedAt.size() <= 64
+        && data.lastSyncSummary is string && data.lastSyncSummary.size() <= 500
+        && data.lastTestedAt is string && data.lastTestedAt.size() <= 64
+        && data.importedCount is int && data.importedCount >= 0 && data.importedCount <= 100000
+        && (!('extensionVerifiedAt' in data) || (data.extensionVerifiedAt is string && data.extensionVerifiedAt.size() <= 64))
+        && (!('gmailVerifiedAt' in data) || (data.gmailVerifiedAt is string && data.gmailVerifiedAt.size() <= 64))
+        && (!('lastImportFileName' in data) || (data.lastImportFileName is string && data.lastImportFileName.size() <= 255))
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidGmailConfirmation(data, userId, confId) {
+      return data.keys().hasAll([
+          'id', 'userId', 'gmailMessageId', 'gmailThreadId', 'fromEmail', 'subject',
+          'snippet', 'receivedAt', 'isConfirmedApplication', 'confidence', 'companyName',
+          'jobTitle', 'jobLocation', 'jobUrl', 'applicationSource', 'applicationDate',
+          'confirmationMessage', 'recruiterName', 'recruiterEmail', 'reviewStatus',
+          'linkedApplicationId', 'createdAt'
+        ])
+        && data.keys().hasOnly([
+          'id', 'userId', 'gmailMessageId', 'gmailThreadId', 'fromEmail', 'subject',
+          'snippet', 'receivedAt', 'isConfirmedApplication', 'confidence', 'companyName',
+          'jobTitle', 'jobLocation', 'jobUrl', 'applicationSource', 'applicationDate',
+          'confirmationMessage', 'recruiterName', 'recruiterEmail', 'reviewStatus',
+          'linkedApplicationId', 'createdAt'
+        ])
+        && data.id == confId
+        && data.userId == userId
+        && data.gmailMessageId is string && data.gmailMessageId.size() >= 1 && data.gmailMessageId.size() <= 200
+        && data.gmailThreadId is string && data.gmailThreadId.size() <= 200
+        && data.fromEmail is string && data.fromEmail.size() <= 320
+        && data.subject is string && data.subject.size() <= 500
+        && data.snippet is string && data.snippet.size() <= 4000
+        && data.receivedAt is string && data.receivedAt.size() <= 64
+        && data.isConfirmedApplication is bool
+        && data.confidence in ['high', 'incomplete', 'not_application']
+        && data.companyName is string && data.companyName.size() <= 200
+        && data.jobTitle is string && data.jobTitle.size() <= 200
+        && data.jobLocation is string && data.jobLocation.size() <= 200
+        && data.jobUrl is string && data.jobUrl.size() <= 2000
+        && data.applicationSource is string && data.applicationSource.size() <= 120
+        && data.applicationDate is string && data.applicationDate.size() <= 32
+        && data.confirmationMessage is string && data.confirmationMessage.size() <= 2000
+        && data.recruiterName is string && data.recruiterName.size() <= 200
+        && data.recruiterEmail is string && data.recruiterEmail.size() <= 320
+        && data.reviewStatus in ['imported', 'pending_review', 'dismissed', 'duplicate_skipped']
+        && data.linkedApplicationId is string && data.linkedApplicationId.size() <= 128
         && data.createdAt is timestamp;
     }
 
@@ -327,10 +409,20 @@ service cloud.firestore {
           && incoming().userId == existing().userId
           && incoming().createdAt == existing().createdAt
           && incoming().updatedAt == request.time
-          && incoming().diff(existing()).affectedKeys().hasOnly([
-            'applicationStatus', 'followUpDate', 'lastCommunicationDate',
-            'notes', 'gmailThreadId', 'updatedAt'
-          ]);
+          && (
+            // Action: Standard status, schedule, and notes update
+            incoming().diff(existing()).affectedKeys().hasOnly([
+              'applicationStatus', 'followUpDate', 'lastCommunicationDate',
+              'notes', 'gmailThreadId', 'confirmationEvidence', 'needsReview', 'updatedAt'
+            ])
+            ||
+            // Action: Pending review completion / verification correction
+            incoming().diff(existing()).affectedKeys().hasOnly([
+              'companyName', 'jobTitle', 'jobLocation', 'jobUrl',
+              'applicationStatus', 'followUpDate', 'lastCommunicationDate',
+              'notes', 'confirmationEvidence', 'needsReview', 'updatedAt'
+            ])
+          );
         allow delete: if isVerifiedOwner(userId) && isValidId(applicationId);
       }
 
@@ -401,7 +493,8 @@ service cloud.firestore {
           && incoming().provider == existing().provider
           && incoming().updatedAt == request.time
           && incoming().diff(existing()).affectedKeys().hasOnly([
-            'connectedEmail', 'status', 'replyTrackingEnabled', 'lastSyncedAt', 'connectedAt', 'updatedAt'
+            'connectedEmail', 'status', 'replyTrackingEnabled', 'autoProcessConfirmations',
+            'lastSyncedAt', 'connectedAt', 'updatedAt'
           ]);
         allow delete: if isVerifiedOwner(userId) && isValidId(connectionId);
       }
@@ -422,6 +515,50 @@ service cloud.firestore {
           && incoming().createdAt == existing().createdAt
           && incoming().diff(existing()).affectedKeys().hasOnly(['applicationId', 'matchConfidence', 'reviewed']);
         allow delete: if isVerifiedOwner(userId) && isValidId(replyId);
+      }
+
+      match /connectedPortals/{portalDocId} {
+        allow get: if isVerifiedOwner(userId) && isValidId(portalDocId);
+        allow list: if isVerifiedOwner(userId) && resource.data.userId == userId;
+        allow create: if isVerifiedOwner(userId)
+          && isValidId(portalDocId)
+          && isValidConnectedPortal(incoming(), userId, portalDocId)
+          && incoming().updatedAt == request.time;
+        allow update: if isVerifiedOwner(userId)
+          && isValidId(portalDocId)
+          && isValidConnectedPortal(incoming(), userId, portalDocId)
+          && incoming().id == existing().id
+          && incoming().userId == existing().userId
+          && incoming().portalId == existing().portalId
+          && incoming().updatedAt == request.time
+          && incoming().diff(existing()).affectedKeys().hasOnly([
+            'portalName', 'status', 'connectionMethod', 'gmailDetectionEnabled',
+            'extensionCaptureEnabled', 'csvImportEnabled', 'lastSyncedAt',
+            'lastSyncSummary', 'lastTestedAt', 'importedCount',
+            'extensionVerifiedAt', 'gmailVerifiedAt', 'lastImportFileName', 'updatedAt'
+          ]);
+        allow delete: if isVerifiedOwner(userId) && isValidId(portalDocId);
+      }
+
+      match /gmailConfirmations/{confirmationId} {
+        allow get: if isVerifiedOwner(userId) && isValidId(confirmationId);
+        allow list: if isVerifiedOwner(userId) && resource.data.userId == userId;
+        allow create: if isVerifiedOwner(userId)
+          && isValidId(confirmationId)
+          && isValidGmailConfirmation(incoming(), userId, confirmationId)
+          && incoming().createdAt == request.time;
+        allow update: if isVerifiedOwner(userId)
+          && isValidId(confirmationId)
+          && isValidGmailConfirmation(incoming(), userId, confirmationId)
+          && incoming().id == existing().id
+          && incoming().userId == existing().userId
+          && incoming().gmailMessageId == existing().gmailMessageId
+          && incoming().createdAt == existing().createdAt
+          && incoming().diff(existing()).affectedKeys().hasOnly([
+            'companyName', 'jobTitle', 'jobLocation', 'jobUrl',
+            'applicationSource', 'applicationDate', 'reviewStatus', 'linkedApplicationId'
+          ]);
+        allow delete: if isVerifiedOwner(userId) && isValidId(confirmationId);
       }
     }
   }

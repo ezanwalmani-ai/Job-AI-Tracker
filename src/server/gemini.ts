@@ -662,3 +662,142 @@ RULES:
       : 'Other',
   }));
 }
+
+export interface DetectedPortalConfirmationItem {
+  gmailMessageId: string;
+  isConfirmedApplication: boolean;
+  confidence: 'high' | 'incomplete' | 'not_application';
+  companyName: string;
+  jobTitle: string;
+  jobLocation: string;
+  jobUrl: string;
+  applicationSource: string;
+  applicationDate: string;
+  confirmationMessage: string;
+  recruiterName: string;
+  recruiterEmail: string;
+}
+
+export async function detectPortalApplicationConfirmations(params: {
+  messages: Array<{
+    gmailMessageId: string;
+    fromEmail: string;
+    fromName: string;
+    subject: string;
+    snippet: string;
+    bodyExcerpt: string;
+    receivedAt: string;
+  }>;
+}): Promise<DetectedPortalConfirmationItem[]> {
+  if (params.messages.length === 0) return [];
+
+  const compactMessages = params.messages.slice(0, 20).map((m) => ({
+    gmailMessageId: m.gmailMessageId,
+    fromEmail: m.fromEmail,
+    fromName: m.fromName,
+    subject: m.subject,
+    receivedAt: m.receivedAt,
+    content: (m.bodyExcerpt || m.snippet || '').slice(0, 2200),
+  }));
+
+  const response = await ai.models.generateContent({
+    model: MODEL,
+    contents: `Analyze these emails from a job seeker's inbox and identify ONLY genuine job application submission confirmations.
+
+EMAILS TO ANALYZE:
+${JSON.stringify(compactMessages, null, 2)}
+
+STRICT DETECTION RULES:
+1. Set isConfirmedApplication = true ONLY when the email proves the user actually SUBMITTED an application (e.g., "Your application has been submitted", "Thank you for applying", "Your application was received", "Application confirmation", "You have successfully applied", "We received your application for...").
+2. Set isConfirmedApplication = false and confidence = "not_application" for:
+   - Job alerts / daily or weekly job digests ("New jobs matching...", "Jobs recommended for you", "10 new jobs in...")
+   - Application invitations ("You're invited to apply", "Apply now", "Recruiter thinks you'd be a great fit")
+   - Saved job reminders, incomplete drafts, newsletters, account security alerts, or marketing emails.
+3. For confirmed submissions (isConfirmedApplication = true):
+   - companyName: Exact hiring company name if stated; otherwise "".
+   - jobTitle: Exact job role/title applied for if stated; otherwise "".
+   - jobLocation: Normalized City, State (e.g., "Pune, Maharashtra") or "" if absent.
+   - jobUrl: Direct job posting or application URL present in the email; otherwise "".
+   - applicationSource: Identify portal cleanly ("LinkedIn", "Indeed", "Naukri", "WorkIndia", "Apna", "Wellfound", "Glassdoor", or "Company Career Page").
+   - applicationDate: YYYY-MM-DD of submission (or receivedAt date YYYY-MM-DD if not explicitly printed in body).
+   - confirmationMessage: Concise verbatim evidence phrase proving submission (max 240 chars).
+   - recruiterName: Recruiter/HR contact name if named; otherwise "".
+   - recruiterEmail: Employer/recruiter reply email if explicitly stated (do NOT invent); otherwise "".
+   - confidence:
+     - "high" if isConfirmedApplication = true AND both companyName and jobTitle are clearly present.
+     - "incomplete" if isConfirmedApplication = true BUT companyName or jobTitle is missing/unclear.`,
+    config: {
+      systemInstruction:
+        'You accurately distinguish confirmed job application submission receipts from job recommendations, vacancy alerts, and invitations. Never fabricate company names, titles, or emails.',
+      thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
+      responseMimeType: 'application/json',
+      responseSchema: {
+        type: Type.ARRAY,
+        items: {
+          type: Type.OBJECT,
+          properties: {
+            gmailMessageId: { type: Type.STRING },
+            isConfirmedApplication: { type: Type.BOOLEAN },
+            confidence: { type: Type.STRING },
+            companyName: { type: Type.STRING },
+            jobTitle: { type: Type.STRING },
+            jobLocation: { type: Type.STRING },
+            jobUrl: { type: Type.STRING },
+            applicationSource: { type: Type.STRING },
+            applicationDate: { type: Type.STRING },
+            confirmationMessage: { type: Type.STRING },
+            recruiterName: { type: Type.STRING },
+            recruiterEmail: { type: Type.STRING },
+          },
+          required: [
+            'gmailMessageId',
+            'isConfirmedApplication',
+            'confidence',
+            'companyName',
+            'jobTitle',
+            'jobLocation',
+            'jobUrl',
+            'applicationSource',
+            'applicationDate',
+            'confirmationMessage',
+            'recruiterName',
+            'recruiterEmail',
+          ],
+        },
+      },
+    },
+  });
+
+  const parsed = JSON.parse((response.text ?? '[]').trim()) as Array<
+    Partial<DetectedPortalConfirmationItem>
+  >;
+
+  return parsed.map((item) => {
+    const confirmed = Boolean(item.isConfirmedApplication);
+    const companyName = String(item.companyName ?? '').trim();
+    const jobTitle = String(item.jobTitle ?? '').trim();
+    let confidence: DetectedPortalConfirmationItem['confidence'] = 'not_application';
+    if (confirmed) {
+      confidence =
+        item.confidence === 'high' && companyName && jobTitle ? 'high' : 'incomplete';
+    }
+
+    const rawLoc = String(item.jobLocation ?? '').trim();
+    const normalizedLoc = rawLoc ? normalizeJobLocationToCityState(rawLoc) : '';
+
+    return {
+      gmailMessageId: String(item.gmailMessageId ?? '').trim(),
+      isConfirmedApplication: confirmed,
+      confidence,
+      companyName,
+      jobTitle,
+      jobLocation: normalizedLoc,
+      jobUrl: String(item.jobUrl ?? '').trim(),
+      applicationSource: String(item.applicationSource ?? '').trim() || 'Company Career Page',
+      applicationDate: String(item.applicationDate ?? '').trim().slice(0, 10),
+      confirmationMessage: String(item.confirmationMessage ?? '').trim().slice(0, 300),
+      recruiterName: String(item.recruiterName ?? '').trim(),
+      recruiterEmail: String(item.recruiterEmail ?? '').trim(),
+    };
+  });
+}

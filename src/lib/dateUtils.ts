@@ -32,7 +32,12 @@ export function formatReadableDate(isoDate: string): string {
 }
 
 export function isTerminalStatus(status: JobApplicationRecord['applicationStatus']): boolean {
-  return status === 'Rejected' || status === 'Offer Received';
+  return (
+    status === 'Rejected' ||
+    status === 'Offer Received' ||
+    status === 'Discovered' ||
+    status === 'Saved'
+  );
 }
 
 export function isFollowUpDue(app: JobApplicationRecord, today = getTodayIsoDate()): boolean {

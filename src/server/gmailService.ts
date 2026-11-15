@@ -227,3 +227,196 @@ export async function fetchRecentGmailReplies(params: {
 
   return details.filter((m): m is GmailInboxMessage => m !== null);
 }
+
+export interface GmailConfirmationCandidate {
+  gmailMessageId: string;
+  gmailThreadId: string;
+  fromEmail: string;
+  fromName: string;
+  subject: string;
+  snippet: string;
+  bodyExcerpt: string;
+  receivedAt: string;
+}
+
+interface GmailMessagePart {
+  mimeType?: string;
+  body?: { data?: string };
+  parts?: GmailMessagePart[];
+}
+
+function decodeBase64Url(data: string): string {
+  try {
+    const normalized = data.replace(/-/g, '+').replace(/_/g, '/');
+    return Buffer.from(normalized, 'base64').toString('utf8');
+  } catch {
+    return '';
+  }
+}
+
+function stripHtmlTags(html: string): string {
+  return html
+    .replace(/<style[\s\S]*?<\/style>/gi, ' ')
+    .replace(/<script[\s\S]*?<\/script>/gi, ' ')
+    .replace(/<a[^>]+href=["']([^"']+)["'][^>]*>([\s\S]*?)<\/a>/gi, '$2 ($1)')
+    .replace(/<[^>]+>/g, ' ')
+    .replace(/&nbsp;/g, ' ')
+    .replace(/&amp;/g, '&')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function extractReadableBody(payload?: GmailMessagePart): string {
+  if (!payload) return '';
+  let plain = '';
+  let html = '';
+
+  const walk = (part: GmailMessagePart) => {
+    if (part.mimeType === 'text/plain' && part.body?.data && !plain) {
+      plain = decodeBase64Url(part.body.data);
+    } else if (part.mimeType === 'text/html' && part.body?.data && !html) {
+      html = decodeBase64Url(part.body.data);
+    }
+    if (Array.isArray(part.parts)) {
+      for (const child of part.parts) {
+        walk(child);
+      }
+    }
+  };
+
+  walk(payload);
+  const raw = plain.trim() || (html ? stripHtmlTags(html) : '');
+  return raw.replace(/\s+/g, ' ').trim().slice(0, 3500);
+}
+
+export async function verifyGmailReadonlyProfile(accessToken: string): Promise<{
+  emailAddress: string;
+  messagesTotal: number;
+}> {
+  const res = await fetch('https://gmail.googleapis.com/gmail/v1/users/me/profile', {
+    headers: {
+      Authorization: `Bearer ${accessToken}`,
+    },
+  });
+
+  const data = (await res.json().catch(() => ({}))) as {
+    emailAddress?: string;
+    messagesTotal?: number;
+    error?: { message?: string };
+  };
+
+  if (!res.ok || !data.emailAddress) {
+    throw new Error(
+      data.error?.message || `Failed to verify read-only Gmail access (HTTP ${res.status})`
+    );
+  }
+
+  return {
+    emailAddress: data.emailAddress,
+    messagesTotal: data.messagesTotal ?? 0,
+  };
+}
+
+export async function fetchJobConfirmationEmails(params: {
+  accessToken: string;
+  userEmail: string;
+  maxResults?: number;
+  portalFilter?: string;
+}): Promise<GmailConfirmationCandidate[]> {
+  let portalClause = '';
+  const filterLower = (params.portalFilter || '').trim().toLowerCase();
+  if (filterLower === 'linkedin') {
+    portalClause = ' (linkedin OR from:jobs-noreply@linkedin.com)';
+  } else if (filterLower === 'indeed') {
+    portalClause = ' (indeed OR from:indeedapply@indeed.com)';
+  } else if (filterLower === 'naukri') {
+    portalClause = ' (naukri OR from:naukri.com)';
+  } else if (filterLower === 'workindia') {
+    portalClause = ' (workindia OR from:workindia.in)';
+  } else if (filterLower === 'apna') {
+    portalClause = ' (apna OR from:apna.co)';
+  }
+
+  const rawQuery =
+    '-from:me -in:drafts ("application has been submitted" OR "thank you for applying" OR "thanks for applying" OR "application was received" OR "application has been received" OR "application confirmation" OR "successfully applied" OR "your application to" OR "your application for" OR from:jobs-noreply@linkedin.com OR from:indeedapply@indeed.com OR from:naukri.com OR from:workindia.in OR from:apna.co)' +
+    portalClause;
+
+  const listRes = await fetch(
+    `https://gmail.googleapis.com/gmail/v1/users/me/messages?q=${encodeURIComponent(
+      rawQuery
+    )}&maxResults=${params.maxResults ?? 20}`,
+    {
+      headers: {
+        Authorization: `Bearer ${params.accessToken}`,
+      },
+    }
+  );
+
+  const listData = (await listRes.json()) as {
+    messages?: Array<{ id: string; threadId: string }>;
+    error?: { message?: string };
+  };
+
+  if (!listRes.ok) {
+    throw new Error(
+      listData.error?.message ||
+        `Failed to scan Gmail for application confirmations (HTTP ${listRes.status})`
+    );
+  }
+
+  const messageRefs = listData.messages ?? [];
+  if (messageRefs.length === 0) return [];
+
+  const details = await Promise.all(
+    messageRefs.slice(0, params.maxResults ?? 20).map(async (ref) => {
+      const msgRes = await fetch(
+        `https://gmail.googleapis.com/gmail/v1/users/me/messages/${ref.id}?format=full`,
+        {
+          headers: {
+            Authorization: `Bearer ${params.accessToken}`,
+          },
+        }
+      );
+      if (!msgRes.ok) return null;
+      const msg = (await msgRes.json()) as {
+        id: string;
+        threadId: string;
+        snippet?: string;
+        internalDate?: string;
+        payload?: GmailMessagePart & {
+          headers?: Array<{ name: string; value: string }>;
+        };
+      };
+
+      const headers = msg.payload?.headers ?? [];
+      const getHeader = (name: string) =>
+        headers.find((h) => h.name.toLowerCase() === name.toLowerCase())?.value ?? '';
+
+      const fromParsed = parseFromHeader(getHeader('From'));
+      if (
+        params.userEmail &&
+        fromParsed.email === params.userEmail.trim().toLowerCase()
+      ) {
+        return null;
+      }
+
+      const internalMs = msg.internalDate ? Number(msg.internalDate) : Date.now();
+      const bodyExcerpt = extractReadableBody(msg.payload);
+
+      return {
+        gmailMessageId: msg.id,
+        gmailThreadId: msg.threadId || '',
+        fromEmail: fromParsed.email,
+        fromName: fromParsed.name || fromParsed.email,
+        subject: getHeader('Subject') || '(No subject)',
+        snippet: msg.snippet || '',
+        bodyExcerpt: bodyExcerpt || msg.snippet || '',
+        receivedAt: new Date(internalMs).toISOString(),
+      } satisfies GmailConfirmationCandidate;
+    })
+  );
+
+  return details.filter((m): m is GmailConfirmationCandidate => m !== null);
+}

@@ -1,0 +1,24 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" fill="none">
+  <defs>
+    <linearGradient id="mjt-bg" x1="2" y1="2" x2="30" y2="30" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#2563EB" />
+      <stop offset="100%" stop-color="#1E3A8A" />
+    </linearGradient>
+  </defs>
+  <rect x="1" y="1" width="30" height="30" rx="8" fill="url(#mjt-bg)" />
+  <path
+    d="M8.5 7.5C8.5 6.67157 9.17157 6 10 6H17L21.5 10.5V22.5C21.5 23.3284 20.8284 24 20 24H10C9.17157 24 8.5 23.3284 8.5 22.5V7.5Z"
+    fill="#FFFFFF"
+  />
+  <path d="M17 6V9.75C17 10.1642 17.3358 10.5 17.75 10.5H21.5L17 6Z" fill="#93C5FD" />
+  <rect x="11" y="10.5" width="4.5" height="2" rx="1" fill="#1D4ED8" />
+  <rect x="11" y="14.25" width="7.5" height="2" rx="1" fill="#1D4ED8" />
+  <circle cx="21.5" cy="21.5" r="6.25" fill="#0F172A" stroke="#2563EB" stroke-width="1.5" />
+  <path
+    d="M19.25 23.75L23.75 19.25M23.75 19.25H20.25M23.75 19.25V22.75"
+    stroke="#FFFFFF"
+    stroke-width="2"
+    stroke-linecap="round"
+    stroke-linejoin="round"
+  />
+</svg>

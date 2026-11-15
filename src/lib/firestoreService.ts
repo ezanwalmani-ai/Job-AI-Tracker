@@ -24,7 +24,13 @@ import type {
   FollowUpRecord,
   EmailConnectionRecord,
   EmailReplyRecord,
+  PortalConnectionRecord,
+  GmailConfirmationRecord,
+  CaptureMethod,
+  PortalId,
 } from '../types.ts';
+import { addCalendarDays, getTodayIsoDate } from './dateUtils.ts';
+import { findDuplicateApplication, getPortalAdapter } from './portalAdapters.ts';
 
 export enum OperationType {
   CREATE = 'create',
@@ -384,10 +390,13 @@ export async function saveEmailApplicationRecord(params: {
       applicationInstructions: (params.applicationInstructions || '').slice(0, 2000),
       applicationSource: (params.applicationSource || 'Direct Email (Gmail)').slice(0, 120),
       applicationMethod: 'email',
+      captureMethod: 'web_gmail',
+      confirmationEvidence: `Sent via Gmail (${params.gmailMessageId || 'verified'}) on ${params.dateApplied}`.slice(0, 2000),
+      needsReview: false,
       dateApplied: params.dateApplied,
       lastCommunicationDate: params.dateApplied,
       followUpDate: params.followUpDate,
-      applicationStatus: 'Email Sent',
+      applicationStatus: 'Applied – Confirmed',
       notes: (params.notes || '').slice(0, 10000),
       aiSummary: params.aiSummary.slice(0, 2000),
       keyRequirements: params.keyRequirements.slice(0, 15).map((s) => s.slice(0, 300)),
@@ -468,6 +477,10 @@ export async function saveManualApplicationRecord(params: {
   requiredExperience?: string;
   applicationInstructions?: string;
   applicationSource: string;
+  captureMethod?: CaptureMethod;
+  confirmationEvidence?: string;
+  needsReview?: boolean;
+  gmailConfirmationMessageId?: string;
   dateApplied: string;
   followUpDate: string;
   applicationStatus: JobApplicationRecord['applicationStatus'];
@@ -484,7 +497,7 @@ export async function saveManualApplicationRecord(params: {
       companyName: params.companyName.slice(0, 200),
       jobTitle: params.jobTitle.slice(0, 200),
       jobDescription: params.jobDescription.slice(0, 60000),
-      jobLocation: params.jobLocation.slice(0, 200),
+      jobLocation: (params.jobLocation || 'Not specified').slice(0, 200),
       jobUrl: params.jobUrl.slice(0, 2000),
       hrEmail: (params.hrEmail || '').slice(0, 320),
       recruiterName: (params.recruiterName || '').slice(0, 200),
@@ -495,6 +508,12 @@ export async function saveManualApplicationRecord(params: {
       applicationInstructions: (params.applicationInstructions || '').slice(0, 2000),
       applicationSource: params.applicationSource.slice(0, 120),
       applicationMethod: 'portal',
+      captureMethod: params.captureMethod || 'manual_portal',
+      confirmationEvidence: (params.confirmationEvidence || '').slice(0, 2000),
+      needsReview: Boolean(params.needsReview),
+      ...(params.gmailConfirmationMessageId
+        ? { gmailConfirmationMessageId: params.gmailConfirmationMessageId.slice(0, 200) }
+        : {}),
       dateApplied: params.dateApplied,
       lastCommunicationDate: params.dateApplied,
       followUpDate: params.followUpDate,
@@ -520,7 +539,17 @@ export async function updateJobApplicationRecord(
   updates: Partial<
     Pick<
       JobApplicationRecord,
-      'applicationStatus' | 'followUpDate' | 'lastCommunicationDate' | 'notes' | 'gmailThreadId'
+      | 'companyName'
+      | 'jobTitle'
+      | 'jobLocation'
+      | 'jobUrl'
+      | 'applicationStatus'
+      | 'followUpDate'
+      | 'lastCommunicationDate'
+      | 'notes'
+      | 'gmailThreadId'
+      | 'confirmationEvidence'
+      | 'needsReview'
     >
   >
 ): Promise<void> {
@@ -596,6 +625,7 @@ export async function saveEmailConnectionState(params: {
   connectedEmail: string;
   status: EmailConnectionRecord['status'];
   replyTrackingEnabled: boolean;
+  autoProcessConfirmations?: boolean;
   lastSyncedAt?: string;
   connectedAt?: string;
 }): Promise<void> {
@@ -610,6 +640,8 @@ export async function saveEmailConnectionState(params: {
         connectedEmail: params.connectedEmail.slice(0, 320),
         status: params.status,
         replyTrackingEnabled: params.replyTrackingEnabled,
+        autoProcessConfirmations:
+          params.autoProcessConfirmations ?? prev.autoProcessConfirmations ?? false,
         lastSyncedAt: params.lastSyncedAt ?? prev.lastSyncedAt,
         connectedAt: params.connectedAt ?? prev.connectedAt,
         updatedAt: serverTimestamp(),
@@ -622,6 +654,7 @@ export async function saveEmailConnectionState(params: {
         connectedEmail: params.connectedEmail.slice(0, 320),
         status: params.status,
         replyTrackingEnabled: params.replyTrackingEnabled,
+        autoProcessConfirmations: params.autoProcessConfirmations ?? false,
         lastSyncedAt: params.lastSyncedAt ?? '',
         connectedAt: params.connectedAt ?? new Date().toISOString(),
         updatedAt: serverTimestamp(),
@@ -686,4 +719,224 @@ export async function assignOrDismissReply(
   } catch (error) {
     handleFirestoreError(error, OperationType.UPDATE, path);
   }
+}
+
+export async function upsertConnectedPortalState(params: {
+  uid: string;
+  portalId: PortalId;
+  updates: Partial<
+    Omit<PortalConnectionRecord, 'id' | 'userId' | 'portalId' | 'updatedAt'>
+  >;
+}): Promise<void> {
+  const adapter = getPortalAdapter(params.portalId);
+  const path = `users/${params.uid}/connectedPortals/${params.portalId}`;
+  const ref = doc(db, 'users', params.uid, 'connectedPortals', params.portalId);
+  try {
+    const snap = await getDoc(ref);
+    if (snap.exists()) {
+      const prev = snap.data() as PortalConnectionRecord;
+      await updateDoc(ref, {
+        portalName: (params.updates.portalName ?? prev.portalName ?? adapter.portalName).slice(0, 120),
+        status: params.updates.status ?? prev.status,
+        connectionMethod: params.updates.connectionMethod ?? prev.connectionMethod,
+        gmailDetectionEnabled: params.updates.gmailDetectionEnabled ?? prev.gmailDetectionEnabled,
+        extensionCaptureEnabled: params.updates.extensionCaptureEnabled ?? prev.extensionCaptureEnabled,
+        csvImportEnabled: params.updates.csvImportEnabled ?? prev.csvImportEnabled,
+        lastSyncedAt: (params.updates.lastSyncedAt ?? prev.lastSyncedAt ?? '').slice(0, 64),
+        lastSyncSummary: (params.updates.lastSyncSummary ?? prev.lastSyncSummary ?? '').slice(0, 500),
+        lastTestedAt: (params.updates.lastTestedAt ?? prev.lastTestedAt ?? '').slice(0, 64),
+        importedCount: params.updates.importedCount ?? prev.importedCount ?? 0,
+        extensionVerifiedAt: (params.updates.extensionVerifiedAt ?? prev.extensionVerifiedAt ?? '').slice(0, 64),
+        gmailVerifiedAt: (params.updates.gmailVerifiedAt ?? prev.gmailVerifiedAt ?? '').slice(0, 64),
+        lastImportFileName: (params.updates.lastImportFileName ?? prev.lastImportFileName ?? '').slice(0, 255),
+        updatedAt: serverTimestamp(),
+      });
+    } else {
+      const record: PortalConnectionRecord = {
+        id: params.portalId,
+        userId: params.uid,
+        portalId: params.portalId,
+        portalName: (params.updates.portalName ?? adapter.portalName).slice(0, 120),
+        status: params.updates.status ?? 'not_connected',
+        connectionMethod: params.updates.connectionMethod ?? 'none',
+        gmailDetectionEnabled: params.updates.gmailDetectionEnabled ?? false,
+        extensionCaptureEnabled: params.updates.extensionCaptureEnabled ?? false,
+        csvImportEnabled: params.updates.csvImportEnabled ?? false,
+        lastSyncedAt: (params.updates.lastSyncedAt ?? '').slice(0, 64),
+        lastSyncSummary: (params.updates.lastSyncSummary ?? '').slice(0, 500),
+        lastTestedAt: (params.updates.lastTestedAt ?? '').slice(0, 64),
+        importedCount: params.updates.importedCount ?? 0,
+        extensionVerifiedAt: (params.updates.extensionVerifiedAt ?? '').slice(0, 64),
+        gmailVerifiedAt: (params.updates.gmailVerifiedAt ?? '').slice(0, 64),
+        lastImportFileName: (params.updates.lastImportFileName ?? '').slice(0, 255),
+        updatedAt: serverTimestamp(),
+      };
+      await setDoc(ref, record);
+    }
+  } catch (error) {
+    handleFirestoreError(error, OperationType.WRITE, path);
+  }
+}
+
+export async function disconnectPortalState(uid: string, portalId: PortalId): Promise<void> {
+  await upsertConnectedPortalState({
+    uid,
+    portalId,
+    updates: {
+      status: 'disconnected',
+      connectionMethod: 'none',
+      gmailDetectionEnabled: false,
+      extensionCaptureEnabled: false,
+      gmailVerifiedAt: '',
+      extensionVerifiedAt: '',
+      lastSyncSummary: 'Disconnected by user',
+    },
+  });
+}
+
+export async function saveGmailConfirmationRecord(
+  uid: string,
+  item: Omit<GmailConfirmationRecord, 'id' | 'userId' | 'createdAt'>
+): Promise<string> {
+  const confId = `conf_${item.gmailMessageId.replace(/[^a-zA-Z0-9_-]/g, '_')}`.slice(0, 120);
+  const path = `users/${uid}/gmailConfirmations/${confId}`;
+  try {
+    const docData: GmailConfirmationRecord = {
+      id: confId,
+      userId: uid,
+      gmailMessageId: item.gmailMessageId.slice(0, 200),
+      gmailThreadId: item.gmailThreadId.slice(0, 200),
+      fromEmail: item.fromEmail.slice(0, 320),
+      subject: item.subject.slice(0, 500),
+      snippet: item.snippet.slice(0, 4000),
+      receivedAt: item.receivedAt.slice(0, 64),
+      isConfirmedApplication: item.isConfirmedApplication,
+      confidence: item.confidence,
+      companyName: item.companyName.slice(0, 200),
+      jobTitle: item.jobTitle.slice(0, 200),
+      jobLocation: item.jobLocation.slice(0, 200),
+      jobUrl: item.jobUrl.slice(0, 2000),
+      applicationSource: item.applicationSource.slice(0, 120),
+      applicationDate: item.applicationDate.slice(0, 32),
+      confirmationMessage: item.confirmationMessage.slice(0, 2000),
+      recruiterName: item.recruiterName.slice(0, 200),
+      recruiterEmail: item.recruiterEmail.slice(0, 320),
+      reviewStatus: item.reviewStatus,
+      linkedApplicationId: item.linkedApplicationId.slice(0, 128),
+      createdAt: serverTimestamp(),
+    };
+    await setDoc(doc(db, 'users', uid, 'gmailConfirmations', confId), docData);
+    return confId;
+  } catch (error) {
+    handleFirestoreError(error, OperationType.CREATE, path);
+  }
+}
+
+export async function updateGmailConfirmationRecord(
+  uid: string,
+  confirmationId: string,
+  updates: Partial<
+    Pick<
+      GmailConfirmationRecord,
+      | 'companyName'
+      | 'jobTitle'
+      | 'jobLocation'
+      | 'jobUrl'
+      | 'applicationSource'
+      | 'applicationDate'
+      | 'reviewStatus'
+      | 'linkedApplicationId'
+    >
+  >
+): Promise<void> {
+  const path = `users/${uid}/gmailConfirmations/${confirmationId}`;
+  try {
+    await updateDoc(doc(db, 'users', uid, 'gmailConfirmations', confirmationId), updates);
+  } catch (error) {
+    handleFirestoreError(error, OperationType.UPDATE, path);
+  }
+}
+
+export async function importApplicationsWithDedupe(params: {
+  uid: string;
+  defaultFollowUpDays: number;
+  existingApplications: JobApplicationRecord[];
+  rows: Array<{
+    companyName: string;
+    jobTitle: string;
+    jobLocation: string;
+    dateApplied: string;
+    jobUrl: string;
+    applicationStatus: JobApplicationRecord['applicationStatus'];
+    applicationSource: string;
+    notes: string;
+  }>;
+}): Promise<{ imported: number; skippedDuplicates: number }> {
+  let imported = 0;
+  let skippedDuplicates = 0;
+  const workingList = [...params.existingApplications];
+
+  for (const row of params.rows) {
+    const dup = findDuplicateApplication(
+      {
+        userId: params.uid,
+        companyName: row.companyName,
+        jobTitle: row.jobTitle,
+        jobUrl: row.jobUrl,
+        dateApplied: row.dateApplied,
+      },
+      workingList
+    );
+    if (dup.isDuplicate) {
+      skippedDuplicates++;
+      continue;
+    }
+
+    const applied = row.dateApplied || getTodayIsoDate();
+    const followUp = addCalendarDays(applied, params.defaultFollowUpDays);
+    const appId = await saveManualApplicationRecord({
+      uid: params.uid,
+      companyName: row.companyName,
+      jobTitle: row.jobTitle,
+      jobDescription: `${row.jobTitle} at ${row.companyName} (${row.jobLocation}) — Imported from ${row.applicationSource} export.`,
+      jobLocation: row.jobLocation || 'Not specified',
+      jobUrl: row.jobUrl,
+      applicationSource: row.applicationSource,
+      captureMethod: 'csv_import',
+      confirmationEvidence: `One-time official CSV / data export import (${row.applicationSource})`,
+      needsReview: false,
+      dateApplied: applied,
+      followUpDate: followUp,
+      applicationStatus: row.applicationStatus,
+      notes: row.notes,
+      aiSummary: `Imported from ${row.applicationSource} export.`,
+      keyRequirements: [],
+    });
+
+    workingList.push({
+      id: appId,
+      userId: params.uid,
+      companyName: row.companyName,
+      jobTitle: row.jobTitle,
+      jobDescription: '',
+      jobLocation: row.jobLocation,
+      jobUrl: row.jobUrl,
+      hrEmail: '',
+      applicationSource: row.applicationSource,
+      applicationMethod: 'portal',
+      captureMethod: 'csv_import',
+      dateApplied: applied,
+      lastCommunicationDate: applied,
+      followUpDate: followUp,
+      applicationStatus: row.applicationStatus,
+      notes: row.notes,
+      aiSummary: '',
+      keyRequirements: [],
+      applicationResumeId: '',
+      gmailThreadId: '',
+    });
+    imported++;
+  }
+
+  return { imported, skippedDuplicates };
 }

@@ -40,13 +40,19 @@ interface ApplicationDetailModalProps {
 }
 
 const ALL_STATUSES: ApplicationStatus[] = [
-  'Applied',
-  'Email Sent',
-  'Waiting for Response',
+  'Applied – Confirmed',
+  'Applied – Manually Recorded',
+  'Awaiting Confirmation',
+  'Follow-up Due',
+  'Saved',
+  'Discovered',
   'HR Responded',
   'Interview Scheduled',
   'Offer Received',
   'Rejected',
+  'Applied',
+  'Email Sent',
+  'Waiting for Response',
 ];
 
 export function ApplicationDetailModal({
@@ -327,6 +333,45 @@ export function ApplicationDetailModal({
                 <p className="text-slate-600 pt-1">
                   Instructions: <span className="text-slate-800">{application.applicationInstructions}</span>
                 </p>
+              )}
+              {application.confirmationEvidence && (
+                <p className="text-slate-600 pt-1">
+                  Verification Evidence:{' '}
+                  <span className="text-emerald-800 font-medium">
+                    {application.confirmationEvidence}
+                  </span>
+                </p>
+              )}
+              {(application.applicationStatus === 'Saved' ||
+                application.applicationStatus === 'Discovered' ||
+                application.applicationStatus === 'Awaiting Confirmation') && (
+                <div className="pt-2">
+                  <button
+                    type="button"
+                    onClick={async () => {
+                      setSaving(true);
+                      try {
+                        await updateJobApplicationRecord(uid, application.id, {
+                          applicationStatus: 'Applied – Manually Recorded',
+                          needsReview: false,
+                          confirmationEvidence:
+                            application.confirmationEvidence ||
+                            `Confirmed by user on ${new Date().toISOString().slice(0, 10)}`,
+                        });
+                        setStatus('Applied – Manually Recorded');
+                        onUpdated(`Confirmed "${application.jobTitle}" as Applied – Manually Recorded.`);
+                      } catch (err) {
+                        onError(err instanceof Error ? err.message : 'Failed to confirm status.');
+                      } finally {
+                        setSaving(false);
+                      }
+                    }}
+                    disabled={saving}
+                    className="px-3 py-1.5 text-xs font-medium text-white bg-emerald-700 hover:bg-emerald-800 rounded-md cursor-pointer"
+                  >
+                    Mark as Applied – Manually Recorded
+                  </button>
+                </div>
               )}
               {application.aiSummary && (
                 <p className="text-slate-600 pt-1 leading-relaxed">{application.aiSummary}</p>

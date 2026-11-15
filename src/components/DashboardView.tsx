@@ -7,6 +7,7 @@ import {
   AlertTriangle,
   Clock,
   ArrowRight,
+  Link2,
 } from 'lucide-react';
 import type {
   EmailConnectionRecord,
@@ -20,7 +21,9 @@ import {
   isFollowUpDue,
   isFollowUpOverdue,
 } from '../lib/dateUtils.ts';
+import { normalizePortalSource } from '../lib/portalAdapters.ts';
 import { statusTextColor } from './MyApplicationsView.tsx';
+import { PortalBrandIcon } from './PortalBrandIcon.tsx';
 
 interface DashboardViewProps {
   applications: JobApplicationRecord[];
@@ -28,9 +31,11 @@ interface DashboardViewProps {
   emailConnection: EmailConnectionRecord | null;
   hasGmailSessionToken: boolean;
   replies: EmailReplyRecord[];
+  pendingConfirmationsCount?: number;
   onNavigate: (
-    tab: 'dashboard' | 'resume' | 'apply' | 'applications' | 'followups' | 'settings'
+    tab: 'dashboard' | 'resume' | 'apply' | 'portals' | 'applications' | 'followups' | 'settings'
   ) => void;
+  onNavigateApplicationsWithPortal?: (portalName: string) => void;
   onOpenManualModal: () => void;
   onSelectApplication: (app: JobApplicationRecord) => void;
   onTriggerFollowUp: (app: JobApplicationRecord) => void;
@@ -42,7 +47,9 @@ export function DashboardView({
   emailConnection,
   hasGmailSessionToken,
   replies,
+  pendingConfirmationsCount = 0,
   onNavigate,
+  onNavigateApplicationsWithPortal,
   onOpenManualModal,
   onSelectApplication,
   onTriggerFollowUp,
@@ -50,48 +57,69 @@ export function DashboardView({
   const today = getTodayIsoDate();
 
   const stats = useMemo(() => {
-    let emailCount = 0;
-    let portalCount = 0;
-    let awaiting = 0;
+    let linkedin = 0;
+    let indeed = 0;
+    let naukri = 0;
+    let workindia = 0;
+    let apna = 0;
+    let directEmail = 0;
+    let companyWebsite = 0;
+    let pendingConfirmation = pendingConfirmationsCount;
     let due = 0;
     let overdue = 0;
     let hrResponded = 0;
     let interviews = 0;
-    let rejected = 0;
     let offers = 0;
 
     for (const app of applications) {
-      if (app.applicationMethod === 'email') emailCount++;
-      else portalCount++;
+      const src = normalizePortalSource(app.applicationSource, app.jobUrl);
+      if (app.applicationMethod === 'email' || src === 'Direct Email (Gmail)') {
+        directEmail++;
+      } else if (src === 'LinkedIn') {
+        linkedin++;
+      } else if (src === 'Indeed') {
+        indeed++;
+      } else if (src === 'Naukri') {
+        naukri++;
+      } else if (src === 'WorkIndia') {
+        workindia++;
+      } else if (src === 'Apna') {
+        apna++;
+      } else if (src === 'Company Career Page') {
+        companyWebsite++;
+      }
 
       if (
-        app.applicationStatus === 'Applied' ||
-        app.applicationStatus === 'Email Sent' ||
-        app.applicationStatus === 'Waiting for Response'
+        app.applicationStatus === 'Awaiting Confirmation' ||
+        app.applicationStatus === 'Saved' ||
+        app.applicationStatus === 'Discovered' ||
+        app.needsReview
       ) {
-        awaiting++;
+        pendingConfirmation++;
       }
       if (isFollowUpDue(app, today)) due++;
       if (isFollowUpOverdue(app, today)) overdue++;
       if (app.applicationStatus === 'HR Responded') hrResponded++;
       if (app.applicationStatus === 'Interview Scheduled') interviews++;
-      if (app.applicationStatus === 'Rejected') rejected++;
       if (app.applicationStatus === 'Offer Received') offers++;
     }
 
     return {
       total: applications.length,
-      emailCount,
-      portalCount,
-      awaiting,
-      due,
-      overdue,
+      linkedin,
+      indeed,
+      naukri,
+      workindia,
+      apna,
+      directEmail,
+      companyWebsite,
+      pendingConfirmation,
+      followUpsDue: due + overdue,
       hrResponded,
       interviews,
-      rejected,
       offers,
     };
-  }, [applications, today]);
+  }, [applications, today, pendingConfirmationsCount]);
 
   const attentionApps = useMemo(
     () =>
@@ -103,17 +131,74 @@ export function DashboardView({
 
   const unreviewedReplies = replies.filter((r) => !r.reviewed).length;
 
-  const statItems: Array<{ label: string; value: number; tone?: 'neutral' | 'amber' | 'red' | 'green' }> = [
-    { label: 'Total Jobs Applied', value: stats.total },
-    { label: 'Sent Through Email', value: stats.emailCount },
-    { label: 'Submitted via Portals', value: stats.portalCount },
-    { label: 'Awaiting Responses', value: stats.awaiting },
-    { label: 'Follow-ups Due', value: stats.due, tone: stats.due > 0 ? 'amber' : 'neutral' },
-    { label: 'Follow-ups Overdue', value: stats.overdue, tone: stats.overdue > 0 ? 'red' : 'neutral' },
-    { label: 'HR Responses Received', value: stats.hrResponded },
-    { label: 'Interviews Scheduled', value: stats.interviews, tone: stats.interviews > 0 ? 'green' : 'neutral' },
-    { label: 'Rejected Applications', value: stats.rejected },
-    { label: 'Offers Received', value: stats.offers, tone: stats.offers > 0 ? 'green' : 'neutral' },
+  const primaryKpis: Array<{
+    label: string;
+    value: number;
+    tone?: 'neutral' | 'amber' | 'red' | 'green';
+    onClick?: () => void;
+  }> = [
+    {
+      label: 'Total Applications',
+      value: stats.total,
+      onClick: () => {
+        onNavigateApplicationsWithPortal?.('All');
+        onNavigate('applications');
+      },
+    },
+    {
+      label: 'Pending Confirmation',
+      value: stats.pendingConfirmation,
+      tone: stats.pendingConfirmation > 0 ? 'amber' : 'neutral',
+      onClick: () => onNavigate('portals'),
+    },
+    {
+      label: 'Follow-ups Due',
+      value: stats.followUpsDue,
+      tone: stats.followUpsDue > 0 ? 'amber' : 'neutral',
+      onClick: () => onNavigate('followups'),
+    },
+    {
+      label: 'HR Responses',
+      value: stats.hrResponded,
+      onClick: () => onNavigate('applications'),
+    },
+    {
+      label: 'Interviews',
+      value: stats.interviews,
+      tone: stats.interviews > 0 ? 'green' : 'neutral',
+      onClick: () => onNavigate('applications'),
+    },
+    {
+      label: 'Offers Received',
+      value: stats.offers,
+      tone: stats.offers > 0 ? 'green' : 'neutral',
+      onClick: () => onNavigate('applications'),
+    },
+  ];
+
+  const sourceKpis: Array<{
+    label: string;
+    portalFilter: string;
+    icon: 'linkedin' | 'indeed' | 'naukri' | 'workindia' | 'apna' | 'email' | 'company_career';
+    value: number;
+  }> = [
+    { label: 'LinkedIn', portalFilter: 'LinkedIn', icon: 'linkedin', value: stats.linkedin },
+    { label: 'Indeed', portalFilter: 'Indeed', icon: 'indeed', value: stats.indeed },
+    { label: 'Naukri', portalFilter: 'Naukri', icon: 'naukri', value: stats.naukri },
+    { label: 'WorkIndia', portalFilter: 'WorkIndia', icon: 'workindia', value: stats.workindia },
+    { label: 'Apna', portalFilter: 'Apna', icon: 'apna', value: stats.apna },
+    {
+      label: 'Direct Email',
+      portalFilter: 'Direct Email (Gmail)',
+      icon: 'email',
+      value: stats.directEmail,
+    },
+    {
+      label: 'Company Website',
+      portalFilter: 'Company Career Page',
+      icon: 'company_career',
+      value: stats.companyWebsite,
+    },
   ];
 
   return (
@@ -160,6 +245,14 @@ export function DashboardView({
           )}
           <button
             type="button"
+            onClick={() => onNavigate('portals')}
+            className="inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-medium text-slate-800 bg-white border border-slate-300 rounded-lg hover:bg-slate-50 cursor-pointer whitespace-nowrap"
+          >
+            <Link2 className="w-3.5 h-3.5" />
+            Connected Portals
+          </button>
+          <button
+            type="button"
             onClick={onOpenManualModal}
             className="inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-medium text-slate-800 bg-white border border-slate-300 rounded-lg hover:bg-slate-50 cursor-pointer whitespace-nowrap"
           >
@@ -177,9 +270,9 @@ export function DashboardView({
         </div>
       </div>
 
-      {/* 10 Statistics Grid */}
-      <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-3">
-        {statItems.map((item) => {
+      {/* Primary Pipeline KPIs */}
+      <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3">
+        {primaryKpis.map((item) => {
           const valColor =
             item.tone === 'red'
               ? 'text-red-700'
@@ -190,17 +283,55 @@ export function DashboardView({
                   : 'text-slate-900';
 
           return (
-            <div
+            <button
               key={item.label}
-              className="bg-white border border-slate-200 rounded-xl p-4"
+              type="button"
+              onClick={item.onClick}
+              className="text-left bg-white border border-slate-200 rounded-xl p-4 hover:border-slate-300 transition-colors cursor-pointer"
             >
               <p className="text-xs text-slate-500">{item.label}</p>
               <p className={`text-2xl font-semibold font-mono tabular-nums mt-1.5 ${valColor}`}>
                 {item.value}
               </p>
-            </div>
+            </button>
           );
         })}
+      </div>
+
+      {/* Applications by Portal & Direct Channels */}
+      <div className="bg-white border border-slate-200 rounded-xl p-5 space-y-3.5">
+        <div className="flex items-center justify-between gap-2">
+          <h3 className="text-sm font-semibold text-slate-900">
+            Applications by Portal &amp; Channel
+          </h3>
+          <button
+            type="button"
+            onClick={() => onNavigate('portals')}
+            className="inline-flex items-center gap-1 text-xs font-medium text-blue-700 hover:underline cursor-pointer"
+          >
+            Manage Connected Portals
+            <ArrowRight className="w-3.5 h-3.5" />
+          </button>
+        </div>
+
+        <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-7 gap-3">
+          {sourceKpis.map((item) => (
+            <button
+              key={item.label}
+              type="button"
+              onClick={() => onNavigateApplicationsWithPortal?.(item.portalFilter)}
+              className="text-left bg-slate-50 border border-slate-200 rounded-lg p-3 hover:bg-slate-100 transition-colors cursor-pointer flex items-center gap-2.5"
+            >
+              <PortalBrandIcon portalId={item.icon} size={30} />
+              <div className="min-w-0">
+                <p className="text-[11px] text-slate-600 truncate">{item.label}</p>
+                <p className="text-lg font-semibold font-mono tabular-nums text-slate-900">
+                  {item.value}
+                </p>
+              </div>
+            </button>
+          ))}
+        </div>
       </div>
 
       {/* Attention Queue & Unreviewed Replies */}

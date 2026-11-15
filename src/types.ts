@@ -1,6 +1,19 @@
 export type ApplicationMethod = 'email' | 'portal';
 
+export type CaptureMethod =
+  | 'web_gmail'
+  | 'gmail_confirmation'
+  | 'chrome_extension'
+  | 'csv_import'
+  | 'manual_portal';
+
 export type ApplicationStatus =
+  | 'Discovered'
+  | 'Saved'
+  | 'Applied – Confirmed'
+  | 'Applied – Manually Recorded'
+  | 'Awaiting Confirmation'
+  | 'Follow-up Due'
   | 'Applied'
   | 'Email Sent'
   | 'Waiting for Response'
@@ -8,6 +21,27 @@ export type ApplicationStatus =
   | 'Interview Scheduled'
   | 'Offer Received'
   | 'Rejected';
+
+export type PortalId =
+  | 'linkedin'
+  | 'indeed'
+  | 'naukri'
+  | 'workindia'
+  | 'apna'
+  | 'company_career';
+
+export type PortalConnectionStatus =
+  | 'not_connected'
+  | 'connected'
+  | 'imported_only'
+  | 'disconnected';
+
+export type PortalConnectionMethod =
+  | 'none'
+  | 'gmail_confirmation'
+  | 'chrome_extension'
+  | 'csv_import'
+  | 'manual_quick_save';
 
 export type ReplyClassification =
   | 'Interview Invitation'
@@ -69,6 +103,10 @@ export interface JobApplicationRecord {
   applicationInstructions?: string;
   applicationSource: string;
   applicationMethod: ApplicationMethod;
+  captureMethod?: CaptureMethod;
+  confirmationEvidence?: string;
+  needsReview?: boolean;
+  gmailConfirmationMessageId?: string;
   dateApplied: string;
   lastCommunicationDate: string;
   followUpDate: string;
@@ -156,6 +194,7 @@ export interface EmailConnectionRecord {
   connectedEmail: string;
   status: 'connected' | 'disconnected' | 'expired';
   replyTrackingEnabled: boolean;
+  autoProcessConfirmations?: boolean;
   lastSyncedAt: string;
   connectedAt: string;
   updatedAt?: unknown;
@@ -176,6 +215,62 @@ export interface EmailReplyRecord {
   matchConfidence: 'high' | 'needs_review';
   reviewed: boolean;
   createdAt?: unknown;
+}
+
+export interface ConnectedPortalRecord {
+  id: string;
+  userId: string;
+  portalId: PortalId;
+  portalName: string;
+  status: PortalConnectionStatus;
+  connectionMethod: PortalConnectionMethod;
+  gmailDetectionEnabled: boolean;
+  extensionCaptureEnabled: boolean;
+  csvImportEnabled: boolean;
+  lastSyncedAt: string;
+  lastSyncSummary: string;
+  lastTestedAt: string;
+  importedCount: number;
+  extensionVerifiedAt?: string;
+  gmailVerifiedAt?: string;
+  lastImportFileName?: string;
+  updatedAt?: unknown;
+}
+
+export interface GmailConfirmationRecord {
+  id: string;
+  userId: string;
+  gmailMessageId: string;
+  gmailThreadId: string;
+  fromEmail: string;
+  subject: string;
+  snippet: string;
+  receivedAt: string;
+  isConfirmedApplication: boolean;
+  confidence: 'high' | 'incomplete' | 'not_application';
+  companyName: string;
+  jobTitle: string;
+  jobLocation: string;
+  jobUrl: string;
+  applicationSource: string;
+  applicationDate: string;
+  confirmationMessage: string;
+  recruiterName: string;
+  recruiterEmail: string;
+  reviewStatus: 'imported' | 'pending_review' | 'dismissed' | 'duplicate_skipped';
+  linkedApplicationId: string;
+  createdAt?: unknown;
+}
+
+export interface ExtensionCapturePayload {
+  companyName: string;
+  jobTitle: string;
+  jobDescription: string;
+  jobLocation: string;
+  jobUrl: string;
+  portalName: string;
+  didApply: boolean;
+  capturedAt?: string;
 }
 
 export interface PdfLocationBox {
@@ -202,4 +297,3 @@ export interface PdfValidationReport {
   normalizedLocation: string;
   placementMode: 'inline' | 'wrapped_column' | 'separate_line' | 'header_badge';
 }
-

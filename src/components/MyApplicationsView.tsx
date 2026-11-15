@@ -2,9 +2,12 @@ import { useMemo, useState } from 'react';
 import { Search, Plus, Send, Eye } from 'lucide-react';
 import type { ApplicationMethod, ApplicationStatus, JobApplicationRecord } from '../types.ts';
 import { formatReadableDate, isFollowUpOverdue, isFollowUpDue } from '../lib/dateUtils.ts';
+import { normalizePortalSource } from '../lib/portalAdapters.ts';
 
 interface MyApplicationsViewProps {
   applications: JobApplicationRecord[];
+  portalFilter?: string;
+  onPortalFilterChange?: (val: string) => void;
   onOpenManualModal: () => void;
   onSelectApplication: (app: JobApplicationRecord) => void;
   onTriggerFollowUp: (app: JobApplicationRecord) => void;
@@ -12,22 +15,51 @@ interface MyApplicationsViewProps {
 
 const STATUS_OPTIONS: Array<'All' | ApplicationStatus> = [
   'All',
-  'Applied',
-  'Email Sent',
-  'Waiting for Response',
+  'Applied – Confirmed',
+  'Applied – Manually Recorded',
+  'Awaiting Confirmation',
+  'Follow-up Due',
+  'Saved',
+  'Discovered',
   'HR Responded',
   'Interview Scheduled',
   'Offer Received',
   'Rejected',
+  'Applied',
+  'Email Sent',
+  'Waiting for Response',
+];
+
+const PORTAL_FILTER_OPTIONS = [
+  'All',
+  'LinkedIn',
+  'Indeed',
+  'Naukri',
+  'WorkIndia',
+  'Apna',
+  'Direct Email (Gmail)',
+  'Company Career Page',
+  'Wellfound',
+  'Glassdoor',
+  'Referral',
+  'Job Portal',
 ];
 
 export function statusTextColor(status: ApplicationStatus): string {
   switch (status) {
     case 'Offer Received':
     case 'Interview Scheduled':
+    case 'Applied – Confirmed':
       return 'text-emerald-700 font-medium';
     case 'HR Responded':
+    case 'Applied – Manually Recorded':
       return 'text-blue-700 font-medium';
+    case 'Awaiting Confirmation':
+    case 'Follow-up Due':
+      return 'text-amber-700 font-medium';
+    case 'Discovered':
+    case 'Saved':
+      return 'text-slate-600 font-medium';
     case 'Email Sent':
     case 'Applied':
     case 'Waiting for Response':
@@ -39,6 +71,8 @@ export function statusTextColor(status: ApplicationStatus): string {
 
 export function MyApplicationsView({
   applications,
+  portalFilter: controlledPortalFilter,
+  onPortalFilterChange,
   onOpenManualModal,
   onSelectApplication,
   onTriggerFollowUp,
@@ -48,8 +82,15 @@ export function MyApplicationsView({
   const [titleFilter, setTitleFilter] = useState('');
   const [locationFilter, setLocationFilter] = useState('');
   const [methodFilter, setMethodFilter] = useState<'all' | ApplicationMethod>('all');
+  const [internalPortalFilter, setInternalPortalFilter] = useState('All');
   const [statusFilter, setStatusFilter] = useState<'All' | ApplicationStatus>('All');
   const [dateFilter, setDateFilter] = useState('');
+
+  const portalFilter = controlledPortalFilter ?? internalPortalFilter;
+  const setPortalFilter = (val: string) => {
+    if (onPortalFilterChange) onPortalFilterChange(val);
+    else setInternalPortalFilter(val);
+  };
 
   const filtered = useMemo(() => {
     const q = searchQuery.trim().toLowerCase();
@@ -67,6 +108,13 @@ export function MyApplicationsView({
       if (tf && !app.jobTitle.toLowerCase().includes(tf)) return false;
       if (lf && !app.jobLocation.toLowerCase().includes(lf)) return false;
       if (methodFilter !== 'all' && app.applicationMethod !== methodFilter) return false;
+      if (portalFilter !== 'All') {
+        const normSource =
+          app.applicationMethod === 'email'
+            ? 'Direct Email (Gmail)'
+            : normalizePortalSource(app.applicationSource, app.jobUrl);
+        if (normSource !== portalFilter) return false;
+      }
       if (statusFilter !== 'All' && app.applicationStatus !== statusFilter) return false;
       if (dateFilter && app.dateApplied !== dateFilter) return false;
       return true;
@@ -78,6 +126,7 @@ export function MyApplicationsView({
     titleFilter,
     locationFilter,
     methodFilter,
+    portalFilter,
     statusFilter,
     dateFilter,
   ]);
@@ -88,6 +137,7 @@ export function MyApplicationsView({
     setTitleFilter('');
     setLocationFilter('');
     setMethodFilter('all');
+    setPortalFilter('All');
     setStatusFilter('All');
     setDateFilter('');
   };
@@ -95,6 +145,7 @@ export function MyApplicationsView({
   const hasActiveFilters =
     Boolean(searchQuery || companyFilter || titleFilter || locationFilter || dateFilter) ||
     methodFilter !== 'all' ||
+    portalFilter !== 'All' ||
     statusFilter !== 'All';
 
   return (
@@ -152,13 +203,15 @@ export function MyApplicationsView({
             className="px-3 py-2 text-sm border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-600"
           />
           <select
-            value={methodFilter}
-            onChange={(e) => setMethodFilter(e.target.value as 'all' | ApplicationMethod)}
+            value={portalFilter}
+            onChange={(e) => setPortalFilter(e.target.value)}
             className="px-3 py-2 text-sm border border-slate-300 rounded-lg bg-white focus:outline-none focus:ring-2 focus:ring-blue-600"
           >
-            <option value="all">All Methods</option>
-            <option value="email">Sent Through Email</option>
-            <option value="portal">Job Portal / Manual</option>
+            {PORTAL_FILTER_OPTIONS.map((p) => (
+              <option key={p} value={p}>
+                {p === 'All' ? 'All Portals & Sources' : p}
+              </option>
+            ))}
           </select>
           <select
             value={statusFilter}
@@ -172,17 +225,26 @@ export function MyApplicationsView({
             ))}
           </select>
           <div className="flex items-center gap-2">
+            <select
+              value={methodFilter}
+              onChange={(e) => setMethodFilter(e.target.value as 'all' | ApplicationMethod)}
+              className="w-32 px-2.5 py-2 text-xs border border-slate-300 rounded-lg bg-white focus:outline-none focus:ring-2 focus:ring-blue-600"
+            >
+              <option value="all">All Methods</option>
+              <option value="email">Email</option>
+              <option value="portal">Portal</option>
+            </select>
             <input
               type="date"
               value={dateFilter}
               onChange={(e) => setDateFilter(e.target.value)}
-              className="flex-1 px-3 py-2 text-sm border border-slate-300 rounded-lg font-mono focus:outline-none focus:ring-2 focus:ring-blue-600"
+              className="flex-1 min-w-0 px-2.5 py-2 text-xs border border-slate-300 rounded-lg font-mono focus:outline-none focus:ring-2 focus:ring-blue-600"
             />
             {hasActiveFilters && (
               <button
                 type="button"
                 onClick={clearFilters}
-                className="px-3 py-2 text-xs font-medium text-slate-600 hover:text-slate-900 border border-slate-300 rounded-lg cursor-pointer whitespace-nowrap"
+                className="px-2.5 py-2 text-xs font-medium text-slate-600 hover:text-slate-900 border border-slate-300 rounded-lg cursor-pointer whitespace-nowrap"
               >
                 Reset
               </button>
@@ -202,7 +264,7 @@ export function MyApplicationsView({
             </p>
             <p className="text-xs text-slate-500 mt-1">
               {applications.length === 0
-                ? 'Apply through Gmail in "Apply for a Job" or record a portal submission via "Add Manual Application".'
+                ? 'Apply through Gmail in "Apply for a Job", connect portals via Gmail Confirmation Scan / Browser Extension, or add manually.'
                 : 'Try adjusting your search query or clearing active filters.'}
             </p>
           </div>
@@ -215,7 +277,7 @@ export function MyApplicationsView({
                   <th className="py-3 px-4">Job Title</th>
                   <th className="py-3 px-4">Location</th>
                   <th className="py-3 px-4">Applied Date</th>
-                  <th className="py-3 px-4">Method</th>
+                  <th className="py-3 px-4">Portal / Method</th>
                   <th className="py-3 px-4">Status</th>
                   <th className="py-3 px-4 text-right">Action</th>
                 </tr>
@@ -239,7 +301,20 @@ export function MyApplicationsView({
                         {formatReadableDate(app.dateApplied)}
                       </td>
                       <td className="py-3 px-4 text-xs text-slate-600">
-                        {app.applicationMethod === 'email' ? 'Email' : app.applicationSource}
+                        <div>
+                          {app.applicationMethod === 'email' ? 'Direct Email' : app.applicationSource}
+                        </div>
+                        {app.captureMethod && app.captureMethod !== 'manual_portal' && (
+                          <div className="text-[11px] text-slate-400">
+                            {app.captureMethod === 'gmail_confirmation'
+                              ? 'Gmail Confirmation'
+                              : app.captureMethod === 'chrome_extension'
+                                ? 'Browser Extension'
+                                : app.captureMethod === 'csv_import'
+                                  ? 'CSV Import'
+                                  : 'Gmail Sent'}
+                          </div>
+                        )}
                       </td>
                       <td className="py-3 px-4 text-xs">
                         <div className="flex flex-col">
