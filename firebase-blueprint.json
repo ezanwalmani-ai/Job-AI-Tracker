@@ -1,0 +1,273 @@
+{
+  "entities": {
+    "UserProfile": {
+      "title": "UserProfile",
+      "description": "Authenticated candidate profile and personal tracker preferences.",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string", "maxLength": 128 },
+        "email": { "type": "string", "format": "email", "maxLength": 320 },
+        "displayName": { "type": "string", "maxLength": 200 },
+        "defaultFollowUpDays": { "type": "integer" },
+        "activeResumeId": { "type": "string", "maxLength": 128 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["uid", "email", "displayName", "defaultFollowUpDays", "activeResumeId", "createdAt", "updatedAt"]
+    },
+    "Resume": {
+      "title": "Resume",
+      "description": "Uploaded master resume PDF metadata, extracted text, and location coordinates.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128 },
+        "userId": { "type": "string", "maxLength": 128 },
+        "fileName": { "type": "string", "maxLength": 255 },
+        "mimeType": { "type": "string", "maxLength": 100 },
+        "fileSize": { "type": "integer" },
+        "version": { "type": "integer" },
+        "isActive": { "type": "boolean" },
+        "extractedText": { "type": "string", "maxLength": 200000 },
+        "candidateName": { "type": "string", "maxLength": 200 },
+        "candidateEmail": { "type": "string", "maxLength": 320 },
+        "candidatePhone": { "type": "string", "maxLength": 60 },
+        "originalLocation": { "type": "string", "maxLength": 300 },
+        "hasLocationBox": { "type": "boolean" },
+        "locPage": { "type": "integer" },
+        "locX": { "type": "number" },
+        "locY": { "type": "number" },
+        "locW": { "type": "number" },
+        "locH": { "type": "number" },
+        "locFontSize": { "type": "number" },
+        "chunkCount": { "type": "integer" },
+        "uploadedAt": { "type": "string", "maxLength": 64 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": [
+        "id", "userId", "fileName", "mimeType", "fileSize", "version", "isActive",
+        "extractedText", "candidateName", "candidateEmail", "candidatePhone",
+        "originalLocation", "hasLocationBox", "locPage", "locX", "locY", "locW", "locH", "locFontSize",
+        "chunkCount", "uploadedAt", "createdAt", "updatedAt"
+      ]
+    },
+    "PdfChunk": {
+      "title": "PdfChunk",
+      "description": "Base64 chunk of an uploaded or tailored PDF binary stored permanently.",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string", "maxLength": 128 },
+        "index": { "type": "integer" },
+        "data": { "type": "string", "maxLength": 700000 },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["userId", "index", "data", "createdAt"]
+    },
+    "JobApplication": {
+      "title": "JobApplication",
+      "description": "Complete record of a job application sent by email or submitted via a job portal.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128 },
+        "userId": { "type": "string", "maxLength": 128 },
+        "companyName": { "type": "string", "maxLength": 200 },
+        "jobTitle": { "type": "string", "maxLength": 200 },
+        "jobDescription": { "type": "string", "maxLength": 60000 },
+        "jobLocation": { "type": "string", "maxLength": 200 },
+        "jobUrl": { "type": "string", "maxLength": 2000 },
+        "hrEmail": { "type": "string", "maxLength": 320 },
+        "recruiterName": { "type": "string", "maxLength": 200 },
+        "companyAddress": { "type": "string", "maxLength": 400 },
+        "salary": { "type": "string", "maxLength": 200 },
+        "employmentType": { "type": "string", "maxLength": 100 },
+        "requiredExperience": { "type": "string", "maxLength": 300 },
+        "applicationInstructions": { "type": "string", "maxLength": 2000 },
+        "applicationSource": { "type": "string", "maxLength": 120 },
+        "applicationMethod": { "type": "string", "enum": ["email", "portal"] },
+        "dateApplied": { "type": "string", "maxLength": 32 },
+        "lastCommunicationDate": { "type": "string", "maxLength": 32 },
+        "followUpDate": { "type": "string", "maxLength": 32 },
+        "applicationStatus": {
+          "type": "string",
+          "enum": ["Applied", "Email Sent", "Waiting for Response", "HR Responded", "Interview Scheduled", "Offer Received", "Rejected"]
+        },
+        "notes": { "type": "string", "maxLength": 10000 },
+        "aiSummary": { "type": "string", "maxLength": 2000 },
+        "keyRequirements": { "type": "array" },
+        "applicationResumeId": { "type": "string", "maxLength": 128 },
+        "gmailThreadId": { "type": "string", "maxLength": 200 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": [
+        "id", "userId", "companyName", "jobTitle", "jobDescription", "jobLocation",
+        "jobUrl", "hrEmail", "applicationSource", "applicationMethod", "dateApplied",
+        "lastCommunicationDate", "followUpDate", "applicationStatus", "notes",
+        "aiSummary", "keyRequirements", "applicationResumeId", "gmailThreadId",
+        "createdAt", "updatedAt"
+      ]
+    },
+    "ApplicationResume": {
+      "title": "ApplicationResume",
+      "description": "Job-specific PDF resume linked to a single job application.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128 },
+        "userId": { "type": "string", "maxLength": 128 },
+        "applicationId": { "type": "string", "maxLength": 128 },
+        "masterResumeId": { "type": "string", "maxLength": 128 },
+        "fileName": { "type": "string", "maxLength": 255 },
+        "originalLocation": { "type": "string", "maxLength": 300 },
+        "targetLocation": { "type": "string", "maxLength": 300 },
+        "updatedLocationLabel": { "type": "string", "maxLength": 350 },
+        "chunkCount": { "type": "integer" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": [
+        "id", "userId", "applicationId", "masterResumeId", "fileName",
+        "originalLocation", "targetLocation", "updatedLocationLabel", "chunkCount", "createdAt"
+      ]
+    },
+    "ApplicationEmail": {
+      "title": "ApplicationEmail",
+      "description": "AI-generated and sent application email record linked to a job application.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128 },
+        "userId": { "type": "string", "maxLength": 128 },
+        "applicationId": { "type": "string", "maxLength": 128 },
+        "recipientEmail": { "type": "string", "maxLength": 320 },
+        "emailSubject": { "type": "string", "maxLength": 500 },
+        "emailBody": { "type": "string", "maxLength": 30000 },
+        "attachmentFileName": { "type": "string", "maxLength": 255 },
+        "attachmentResumeId": { "type": "string", "maxLength": 128 },
+        "gmailMessageId": { "type": "string", "maxLength": 200 },
+        "gmailThreadId": { "type": "string", "maxLength": 200 },
+        "emailStatus": { "type": "string", "enum": ["draft", "sent", "failed"] },
+        "errorMessage": { "type": "string", "maxLength": 2000 },
+        "sentAt": { "type": "string", "maxLength": 64 },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": [
+        "id", "userId", "applicationId", "recipientEmail", "emailSubject", "emailBody",
+        "attachmentFileName", "attachmentResumeId", "gmailMessageId", "gmailThreadId",
+        "emailStatus", "errorMessage", "sentAt", "createdAt"
+      ]
+    },
+    "FollowUpHistory": {
+      "title": "FollowUpHistory",
+      "description": "Follow-up communication records and outcomes for a job application.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128 },
+        "userId": { "type": "string", "maxLength": 128 },
+        "applicationId": { "type": "string", "maxLength": 128 },
+        "followUpDate": { "type": "string", "maxLength": 32 },
+        "recipientEmail": { "type": "string", "maxLength": 320 },
+        "emailSubject": { "type": "string", "maxLength": 500 },
+        "emailBody": { "type": "string", "maxLength": 30000 },
+        "gmailMessageId": { "type": "string", "maxLength": 200 },
+        "status": { "type": "string", "enum": ["sent", "logged", "failed"] },
+        "outcome": { "type": "string", "maxLength": 500 },
+        "sentAt": { "type": "string", "maxLength": 64 },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": [
+        "id", "userId", "applicationId", "followUpDate", "recipientEmail",
+        "emailSubject", "emailBody", "gmailMessageId", "status", "outcome",
+        "sentAt", "createdAt"
+      ]
+    },
+    "EmailConnection": {
+      "title": "EmailConnection",
+      "description": "Gmail OAuth connection metadata (no passwords or tokens stored).",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128 },
+        "userId": { "type": "string", "maxLength": 128 },
+        "provider": { "type": "string", "enum": ["gmail"] },
+        "connectedEmail": { "type": "string", "maxLength": 320 },
+        "status": { "type": "string", "enum": ["connected", "disconnected", "expired"] },
+        "replyTrackingEnabled": { "type": "boolean" },
+        "lastSyncedAt": { "type": "string", "maxLength": 64 },
+        "connectedAt": { "type": "string", "maxLength": 64 },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": [
+        "id", "userId", "provider", "connectedEmail", "status",
+        "replyTrackingEnabled", "lastSyncedAt", "connectedAt", "updatedAt"
+      ]
+    },
+    "EmailReply": {
+      "title": "EmailReply",
+      "description": "Matched or pending-review HR email reply fetched from Gmail.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128 },
+        "userId": { "type": "string", "maxLength": 128 },
+        "applicationId": { "type": "string", "maxLength": 128 },
+        "gmailMessageId": { "type": "string", "maxLength": 200 },
+        "gmailThreadId": { "type": "string", "maxLength": 200 },
+        "fromEmail": { "type": "string", "maxLength": 320 },
+        "fromName": { "type": "string", "maxLength": 200 },
+        "subject": { "type": "string", "maxLength": 500 },
+        "snippet": { "type": "string", "maxLength": 4000 },
+        "receivedAt": { "type": "string", "maxLength": 64 },
+        "classification": {
+          "type": "string",
+          "enum": ["Interview Invitation", "Further Information Requested", "Rejection", "Acknowledgement", "Other"]
+        },
+        "matchConfidence": { "type": "string", "enum": ["high", "needs_review"] },
+        "reviewed": { "type": "boolean" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": [
+        "id", "userId", "applicationId", "gmailMessageId", "gmailThreadId",
+        "fromEmail", "fromName", "subject", "snippet", "receivedAt",
+        "classification", "matchConfidence", "reviewed", "createdAt"
+      ]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": { "$ref": "#/entities/UserProfile" },
+      "description": "User account profile and default follow-up preferences."
+    },
+    "/users/{userId}/resumes/{resumeId}": {
+      "schema": { "$ref": "#/entities/Resume" },
+      "description": "Master resume versions uploaded by the user."
+    },
+    "/users/{userId}/resumes/{resumeId}/chunks/{chunkId}": {
+      "schema": { "$ref": "#/entities/PdfChunk" },
+      "description": "Permanent PDF binary chunks for a master resume."
+    },
+    "/users/{userId}/jobApplications/{applicationId}": {
+      "schema": { "$ref": "#/entities/JobApplication" },
+      "description": "Job application records across email and portal methods."
+    },
+    "/users/{userId}/applicationResumes/{appResumeId}": {
+      "schema": { "$ref": "#/entities/ApplicationResume" },
+      "description": "Job-specific tailored resume metadata linked to an application."
+    },
+    "/users/{userId}/applicationResumes/{appResumeId}/chunks/{chunkId}": {
+      "schema": { "$ref": "#/entities/PdfChunk" },
+      "description": "Permanent PDF binary chunks for a job-specific tailored resume."
+    },
+    "/users/{userId}/applicationEmails/{emailId}": {
+      "schema": { "$ref": "#/entities/ApplicationEmail" },
+      "description": "Sent and drafted job application emails."
+    },
+    "/users/{userId}/followUpHistory/{followUpId}": {
+      "schema": { "$ref": "#/entities/FollowUpHistory" },
+      "description": "Follow-up emails and manual follow-up logs."
+    },
+    "/users/{userId}/emailConnections/{connectionId}": {
+      "schema": { "$ref": "#/entities/EmailConnection" },
+      "description": "Connected Gmail account status and metadata."
+    },
+    "/users/{userId}/emailReplies/{replyId}": {
+      "schema": { "$ref": "#/entities/EmailReply" },
+      "description": "Incoming HR email replies matched or awaiting review."
+    }
+  }
+}

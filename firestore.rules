@@ -1,0 +1,428 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Global default-deny safety net
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() >= 1 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function isVerifiedOwner(userId) {
+      return isSignedIn()
+        && isValidId(userId)
+        && request.auth.token.email_verified == true
+        && request.auth.uid == userId;
+    }
+
+    function isValidUserProfile(data, userId) {
+      return data.keys().hasAll(['uid', 'email', 'displayName', 'defaultFollowUpDays', 'activeResumeId', 'createdAt', 'updatedAt'])
+        && data.keys().hasOnly(['uid', 'email', 'displayName', 'defaultFollowUpDays', 'activeResumeId', 'createdAt', 'updatedAt'])
+        && data.uid == userId
+        && data.email is string && data.email.size() <= 320
+        && data.displayName is string && data.displayName.size() <= 200
+        && data.defaultFollowUpDays is int && data.defaultFollowUpDays >= 1 && data.defaultFollowUpDays <= 60
+        && data.activeResumeId is string && data.activeResumeId.size() <= 128
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidResume(data, userId, resumeId) {
+      return data.keys().hasAll([
+          'id', 'userId', 'fileName', 'mimeType', 'fileSize', 'version', 'isActive',
+          'extractedText', 'candidateName', 'candidateEmail', 'candidatePhone',
+          'originalLocation', 'hasLocationBox', 'locPage', 'locX', 'locY', 'locW', 'locH', 'locFontSize',
+          'chunkCount', 'uploadedAt', 'createdAt', 'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'id', 'userId', 'fileName', 'mimeType', 'fileSize', 'version', 'isActive',
+          'extractedText', 'candidateName', 'candidateEmail', 'candidatePhone',
+          'originalLocation', 'hasLocationBox', 'locPage', 'locX', 'locY', 'locW', 'locH', 'locFontSize',
+          'chunkCount', 'uploadedAt', 'createdAt', 'updatedAt'
+        ])
+        && data.id == resumeId
+        && data.userId == userId
+        && data.fileName is string && data.fileName.size() >= 1 && data.fileName.size() <= 255
+        && data.mimeType is string && data.mimeType.size() <= 100
+        && data.fileSize is int && data.fileSize >= 1 && data.fileSize <= 15000000
+        && data.version is int && data.version >= 1 && data.version <= 10000
+        && data.isActive is bool
+        && data.extractedText is string && data.extractedText.size() <= 200000
+        && data.candidateName is string && data.candidateName.size() <= 200
+        && data.candidateEmail is string && data.candidateEmail.size() <= 320
+        && data.candidatePhone is string && data.candidatePhone.size() <= 60
+        && data.originalLocation is string && data.originalLocation.size() <= 300
+        && data.hasLocationBox is bool
+        && data.locPage is int && data.locPage >= 0 && data.locPage <= 50
+        && data.locX is number && data.locY is number && data.locW is number && data.locH is number && data.locFontSize is number
+        && data.chunkCount is int && data.chunkCount >= 1 && data.chunkCount <= 40
+        && data.uploadedAt is string && data.uploadedAt.size() <= 64
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidPdfChunk(data, userId) {
+      return data.keys().hasAll(['userId', 'index', 'data', 'createdAt'])
+        && data.keys().hasOnly(['userId', 'index', 'data', 'createdAt'])
+        && data.userId == userId
+        && data.index is int && data.index >= 0 && data.index <= 40
+        && data.data is string && data.data.size() >= 1 && data.data.size() <= 700000
+        && data.createdAt is timestamp;
+    }
+
+    function isValidApplicationStatus(status) {
+      return status in [
+        'Applied',
+        'Email Sent',
+        'Waiting for Response',
+        'HR Responded',
+        'Interview Scheduled',
+        'Offer Received',
+        'Rejected'
+      ];
+    }
+
+    function isValidJobApplication(data, userId, applicationId) {
+      return data.keys().hasAll([
+          'id', 'userId', 'companyName', 'jobTitle', 'jobDescription', 'jobLocation',
+          'jobUrl', 'hrEmail', 'applicationSource', 'applicationMethod', 'dateApplied',
+          'lastCommunicationDate', 'followUpDate', 'applicationStatus', 'notes',
+          'aiSummary', 'keyRequirements', 'applicationResumeId', 'gmailThreadId',
+          'createdAt', 'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'id', 'userId', 'companyName', 'jobTitle', 'jobDescription', 'jobLocation',
+          'jobUrl', 'hrEmail', 'recruiterName', 'companyAddress', 'salary',
+          'employmentType', 'requiredExperience', 'applicationInstructions',
+          'applicationSource', 'applicationMethod', 'dateApplied',
+          'lastCommunicationDate', 'followUpDate', 'applicationStatus', 'notes',
+          'aiSummary', 'keyRequirements', 'applicationResumeId', 'gmailThreadId',
+          'createdAt', 'updatedAt'
+        ])
+        && data.id == applicationId
+        && data.userId == userId
+        && data.companyName is string && data.companyName.size() >= 1 && data.companyName.size() <= 200
+        && data.jobTitle is string && data.jobTitle.size() >= 1 && data.jobTitle.size() <= 200
+        && data.jobDescription is string && data.jobDescription.size() <= 60000
+        && data.jobLocation is string && data.jobLocation.size() >= 1 && data.jobLocation.size() <= 200
+        && data.jobUrl is string && data.jobUrl.size() <= 2000
+        && data.hrEmail is string && data.hrEmail.size() <= 320
+        && (!('recruiterName' in data) || (data.recruiterName is string && data.recruiterName.size() <= 200))
+        && (!('companyAddress' in data) || (data.companyAddress is string && data.companyAddress.size() <= 400))
+        && (!('salary' in data) || (data.salary is string && data.salary.size() <= 200))
+        && (!('employmentType' in data) || (data.employmentType is string && data.employmentType.size() <= 100))
+        && (!('requiredExperience' in data) || (data.requiredExperience is string && data.requiredExperience.size() <= 300))
+        && (!('applicationInstructions' in data) || (data.applicationInstructions is string && data.applicationInstructions.size() <= 2000))
+        && data.applicationSource is string && data.applicationSource.size() <= 120
+        && data.applicationMethod in ['email', 'portal']
+        && data.dateApplied is string && data.dateApplied.size() <= 32
+        && data.lastCommunicationDate is string && data.lastCommunicationDate.size() <= 32
+        && data.followUpDate is string && data.followUpDate.size() <= 32
+        && isValidApplicationStatus(data.applicationStatus)
+        && data.notes is string && data.notes.size() <= 10000
+        && data.aiSummary is string && data.aiSummary.size() <= 2000
+        && data.keyRequirements is list && data.keyRequirements.size() <= 15
+        && (data.keyRequirements.size() == 0 || (data.keyRequirements[0] is string && data.keyRequirements[0].size() <= 300))
+        && data.applicationResumeId is string && data.applicationResumeId.size() <= 128
+        && data.gmailThreadId is string && data.gmailThreadId.size() <= 200
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidApplicationResume(data, userId, appResumeId) {
+      return data.keys().hasAll([
+          'id', 'userId', 'applicationId', 'masterResumeId', 'fileName',
+          'originalLocation', 'targetLocation', 'updatedLocationLabel', 'chunkCount', 'createdAt'
+        ])
+        && data.keys().hasOnly([
+          'id', 'userId', 'applicationId', 'masterResumeId', 'fileName',
+          'originalLocation', 'targetLocation', 'updatedLocationLabel', 'chunkCount', 'createdAt'
+        ])
+        && data.id == appResumeId
+        && data.userId == userId
+        && data.applicationId is string && data.applicationId.size() >= 1 && data.applicationId.size() <= 128
+        && data.masterResumeId is string && data.masterResumeId.size() >= 1 && data.masterResumeId.size() <= 128
+        && data.fileName is string && data.fileName.size() >= 1 && data.fileName.size() <= 255
+        && data.originalLocation is string && data.originalLocation.size() <= 300
+        && data.targetLocation is string && data.targetLocation.size() <= 300
+        && data.updatedLocationLabel is string && data.updatedLocationLabel.size() <= 350
+        && data.chunkCount is int && data.chunkCount >= 1 && data.chunkCount <= 40
+        && data.createdAt is timestamp;
+    }
+
+    function isValidApplicationEmail(data, userId, emailId) {
+      return data.keys().hasAll([
+          'id', 'userId', 'applicationId', 'recipientEmail', 'emailSubject', 'emailBody',
+          'attachmentFileName', 'attachmentResumeId', 'gmailMessageId', 'gmailThreadId',
+          'emailStatus', 'errorMessage', 'sentAt', 'createdAt'
+        ])
+        && data.keys().hasOnly([
+          'id', 'userId', 'applicationId', 'recipientEmail', 'emailSubject', 'emailBody',
+          'attachmentFileName', 'attachmentResumeId', 'gmailMessageId', 'gmailThreadId',
+          'emailStatus', 'errorMessage', 'sentAt', 'createdAt'
+        ])
+        && data.id == emailId
+        && data.userId == userId
+        && data.applicationId is string && data.applicationId.size() >= 1 && data.applicationId.size() <= 128
+        && data.recipientEmail is string && data.recipientEmail.size() <= 320
+        && data.emailSubject is string && data.emailSubject.size() <= 500
+        && data.emailBody is string && data.emailBody.size() <= 30000
+        && data.attachmentFileName is string && data.attachmentFileName.size() <= 255
+        && data.attachmentResumeId is string && data.attachmentResumeId.size() <= 128
+        && data.gmailMessageId is string && data.gmailMessageId.size() <= 200
+        && data.gmailThreadId is string && data.gmailThreadId.size() <= 200
+        && data.emailStatus in ['draft', 'sent', 'failed']
+        && data.errorMessage is string && data.errorMessage.size() <= 2000
+        && data.sentAt is string && data.sentAt.size() <= 64
+        && data.createdAt is timestamp;
+    }
+
+    function isValidFollowUpHistory(data, userId, followUpId) {
+      return data.keys().hasAll([
+          'id', 'userId', 'applicationId', 'followUpDate', 'recipientEmail',
+          'emailSubject', 'emailBody', 'gmailMessageId', 'status', 'outcome',
+          'sentAt', 'createdAt'
+        ])
+        && data.keys().hasOnly([
+          'id', 'userId', 'applicationId', 'followUpDate', 'recipientEmail',
+          'emailSubject', 'emailBody', 'gmailMessageId', 'status', 'outcome',
+          'sentAt', 'createdAt'
+        ])
+        && data.id == followUpId
+        && data.userId == userId
+        && data.applicationId is string && data.applicationId.size() >= 1 && data.applicationId.size() <= 128
+        && data.followUpDate is string && data.followUpDate.size() <= 32
+        && data.recipientEmail is string && data.recipientEmail.size() <= 320
+        && data.emailSubject is string && data.emailSubject.size() <= 500
+        && data.emailBody is string && data.emailBody.size() <= 30000
+        && data.gmailMessageId is string && data.gmailMessageId.size() <= 200
+        && data.status in ['sent', 'logged', 'failed']
+        && data.outcome is string && data.outcome.size() <= 500
+        && data.sentAt is string && data.sentAt.size() <= 64
+        && data.createdAt is timestamp;
+    }
+
+    function isValidEmailConnection(data, userId, connectionId) {
+      return data.keys().hasAll([
+          'id', 'userId', 'provider', 'connectedEmail', 'status',
+          'replyTrackingEnabled', 'lastSyncedAt', 'connectedAt', 'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'id', 'userId', 'provider', 'connectedEmail', 'status',
+          'replyTrackingEnabled', 'lastSyncedAt', 'connectedAt', 'updatedAt'
+        ])
+        && data.id == connectionId
+        && data.userId == userId
+        && data.provider == 'gmail'
+        && data.connectedEmail is string && data.connectedEmail.size() <= 320
+        && data.status in ['connected', 'disconnected', 'expired']
+        && data.replyTrackingEnabled is bool
+        && data.lastSyncedAt is string && data.lastSyncedAt.size() <= 64
+        && data.connectedAt is string && data.connectedAt.size() <= 64
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidEmailReply(data, userId, replyId) {
+      return data.keys().hasAll([
+          'id', 'userId', 'applicationId', 'gmailMessageId', 'gmailThreadId',
+          'fromEmail', 'fromName', 'subject', 'snippet', 'receivedAt',
+          'classification', 'matchConfidence', 'reviewed', 'createdAt'
+        ])
+        && data.keys().hasOnly([
+          'id', 'userId', 'applicationId', 'gmailMessageId', 'gmailThreadId',
+          'fromEmail', 'fromName', 'subject', 'snippet', 'receivedAt',
+          'classification', 'matchConfidence', 'reviewed', 'createdAt'
+        ])
+        && data.id == replyId
+        && data.userId == userId
+        && data.applicationId is string && data.applicationId.size() <= 128
+        && data.gmailMessageId is string && data.gmailMessageId.size() >= 1 && data.gmailMessageId.size() <= 200
+        && data.gmailThreadId is string && data.gmailThreadId.size() <= 200
+        && data.fromEmail is string && data.fromEmail.size() <= 320
+        && data.fromName is string && data.fromName.size() <= 200
+        && data.subject is string && data.subject.size() <= 500
+        && data.snippet is string && data.snippet.size() <= 4000
+        && data.receivedAt is string && data.receivedAt.size() <= 64
+        && data.classification in [
+          'Interview Invitation',
+          'Further Information Requested',
+          'Rejection',
+          'Acknowledgement',
+          'Other'
+        ]
+        && data.matchConfidence in ['high', 'needs_review']
+        && data.reviewed is bool
+        && data.createdAt is timestamp;
+    }
+
+    match /users/{userId} {
+      allow get: if isVerifiedOwner(userId);
+      allow create: if isVerifiedOwner(userId)
+        && isValidUserProfile(incoming(), userId)
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time;
+      allow update: if isVerifiedOwner(userId)
+        && isValidUserProfile(incoming(), userId)
+        && incoming().uid == existing().uid
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && incoming().diff(existing()).affectedKeys().hasOnly(['email', 'displayName', 'defaultFollowUpDays', 'activeResumeId', 'updatedAt']);
+
+      match /resumes/{resumeId} {
+        allow get: if isVerifiedOwner(userId) && isValidId(resumeId);
+        allow list: if isVerifiedOwner(userId) && resource.data.userId == userId;
+        allow create: if isVerifiedOwner(userId)
+          && isValidId(resumeId)
+          && isValidResume(incoming(), userId, resumeId)
+          && incoming().createdAt == request.time
+          && incoming().updatedAt == request.time;
+        allow update: if isVerifiedOwner(userId)
+          && isValidId(resumeId)
+          && isValidResume(incoming(), userId, resumeId)
+          && incoming().id == existing().id
+          && incoming().userId == existing().userId
+          && incoming().createdAt == existing().createdAt
+          && incoming().updatedAt == request.time
+          && incoming().diff(existing()).affectedKeys().hasOnly(['isActive', 'updatedAt']);
+        allow delete: if isVerifiedOwner(userId) && isValidId(resumeId);
+
+        match /chunks/{chunkId} {
+          allow get: if isVerifiedOwner(userId) && isValidId(resumeId) && isValidId(chunkId);
+          allow list: if isVerifiedOwner(userId) && isValidId(resumeId) && resource.data.userId == userId;
+          allow create: if isVerifiedOwner(userId)
+            && isValidId(resumeId)
+            && isValidId(chunkId)
+            && isValidPdfChunk(incoming(), userId)
+            && incoming().createdAt == request.time;
+          allow delete: if isVerifiedOwner(userId) && isValidId(resumeId) && isValidId(chunkId);
+        }
+      }
+
+      match /jobApplications/{applicationId} {
+        allow get: if isVerifiedOwner(userId) && isValidId(applicationId);
+        allow list: if isVerifiedOwner(userId) && resource.data.userId == userId;
+        allow create: if isVerifiedOwner(userId)
+          && isValidId(applicationId)
+          && isValidJobApplication(incoming(), userId, applicationId)
+          && incoming().createdAt == request.time
+          && incoming().updatedAt == request.time;
+        allow update: if isVerifiedOwner(userId)
+          && isValidId(applicationId)
+          && isValidJobApplication(incoming(), userId, applicationId)
+          && incoming().id == existing().id
+          && incoming().userId == existing().userId
+          && incoming().createdAt == existing().createdAt
+          && incoming().updatedAt == request.time
+          && incoming().diff(existing()).affectedKeys().hasOnly([
+            'applicationStatus', 'followUpDate', 'lastCommunicationDate',
+            'notes', 'gmailThreadId', 'updatedAt'
+          ]);
+        allow delete: if isVerifiedOwner(userId) && isValidId(applicationId);
+      }
+
+      match /applicationResumes/{appResumeId} {
+        allow get: if isVerifiedOwner(userId) && isValidId(appResumeId);
+        allow list: if isVerifiedOwner(userId) && resource.data.userId == userId;
+        allow create: if isVerifiedOwner(userId)
+          && isValidId(appResumeId)
+          && isValidApplicationResume(incoming(), userId, appResumeId)
+          && incoming().createdAt == request.time
+          && exists(/databases/$(database)/documents/users/$(userId)/jobApplications/$(incoming().applicationId));
+        allow delete: if isVerifiedOwner(userId) && isValidId(appResumeId);
+
+        match /chunks/{chunkId} {
+          allow get: if isVerifiedOwner(userId) && isValidId(appResumeId) && isValidId(chunkId);
+          allow list: if isVerifiedOwner(userId) && isValidId(appResumeId) && resource.data.userId == userId;
+          allow create: if isVerifiedOwner(userId)
+            && isValidId(appResumeId)
+            && isValidId(chunkId)
+            && isValidPdfChunk(incoming(), userId)
+            && incoming().createdAt == request.time;
+          allow delete: if isVerifiedOwner(userId) && isValidId(appResumeId) && isValidId(chunkId);
+        }
+      }
+
+      match /applicationEmails/{emailId} {
+        allow get: if isVerifiedOwner(userId) && isValidId(emailId);
+        allow list: if isVerifiedOwner(userId) && resource.data.userId == userId;
+        allow create: if isVerifiedOwner(userId)
+          && isValidId(emailId)
+          && isValidApplicationEmail(incoming(), userId, emailId)
+          && incoming().createdAt == request.time
+          && exists(/databases/$(database)/documents/users/$(userId)/jobApplications/$(incoming().applicationId));
+        allow delete: if isVerifiedOwner(userId) && isValidId(emailId);
+      }
+
+      match /followUpHistory/{followUpId} {
+        allow get: if isVerifiedOwner(userId) && isValidId(followUpId);
+        allow list: if isVerifiedOwner(userId) && resource.data.userId == userId;
+        allow create: if isVerifiedOwner(userId)
+          && isValidId(followUpId)
+          && isValidFollowUpHistory(incoming(), userId, followUpId)
+          && incoming().createdAt == request.time
+          && exists(/databases/$(database)/documents/users/$(userId)/jobApplications/$(incoming().applicationId));
+        allow update: if isVerifiedOwner(userId)
+          && isValidId(followUpId)
+          && isValidFollowUpHistory(incoming(), userId, followUpId)
+          && incoming().id == existing().id
+          && incoming().userId == existing().userId
+          && incoming().applicationId == existing().applicationId
+          && incoming().createdAt == existing().createdAt
+          && incoming().diff(existing()).affectedKeys().hasOnly(['outcome']);
+        allow delete: if isVerifiedOwner(userId) && isValidId(followUpId);
+      }
+
+      match /emailConnections/{connectionId} {
+        allow get: if isVerifiedOwner(userId) && isValidId(connectionId);
+        allow list: if isVerifiedOwner(userId) && resource.data.userId == userId;
+        allow create: if isVerifiedOwner(userId)
+          && isValidId(connectionId)
+          && isValidEmailConnection(incoming(), userId, connectionId)
+          && incoming().updatedAt == request.time;
+        allow update: if isVerifiedOwner(userId)
+          && isValidId(connectionId)
+          && isValidEmailConnection(incoming(), userId, connectionId)
+          && incoming().id == existing().id
+          && incoming().userId == existing().userId
+          && incoming().provider == existing().provider
+          && incoming().updatedAt == request.time
+          && incoming().diff(existing()).affectedKeys().hasOnly([
+            'connectedEmail', 'status', 'replyTrackingEnabled', 'lastSyncedAt', 'connectedAt', 'updatedAt'
+          ]);
+        allow delete: if isVerifiedOwner(userId) && isValidId(connectionId);
+      }
+
+      match /emailReplies/{replyId} {
+        allow get: if isVerifiedOwner(userId) && isValidId(replyId);
+        allow list: if isVerifiedOwner(userId) && resource.data.userId == userId;
+        allow create: if isVerifiedOwner(userId)
+          && isValidId(replyId)
+          && isValidEmailReply(incoming(), userId, replyId)
+          && incoming().createdAt == request.time;
+        allow update: if isVerifiedOwner(userId)
+          && isValidId(replyId)
+          && isValidEmailReply(incoming(), userId, replyId)
+          && incoming().id == existing().id
+          && incoming().userId == existing().userId
+          && incoming().gmailMessageId == existing().gmailMessageId
+          && incoming().createdAt == existing().createdAt
+          && incoming().diff(existing()).affectedKeys().hasOnly(['applicationId', 'matchConfidence', 'reviewed']);
+        allow delete: if isVerifiedOwner(userId) && isValidId(replyId);
+      }
+    }
+  }
+}

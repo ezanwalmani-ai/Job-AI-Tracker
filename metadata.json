@@ -1,0 +1,6 @@
+{
+  "name": "My Job Tracker",
+  "description": "Personal AI job application manager for storing your master resume, tailoring job-specific resumes, generating personalized application emails, sending via Gmail, and tracking follow-ups.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
