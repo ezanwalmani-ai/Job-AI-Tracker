@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { User } from 'firebase/auth';
 import {
   LayoutDashboard,
@@ -39,13 +39,16 @@ import {
 import {
   ensureUserProfile,
   saveEmailConnectionState,
+  saveGmailConfirmationRecord,
   saveManualApplicationRecord,
   subscribeCollection,
   subscribeUserProfile,
   upsertConnectedPortalState,
 } from './lib/firestoreService.ts';
+import { scanGmailConfirmationsApi } from './lib/apiClient.ts';
 import { addCalendarDays, getTodayIsoDate } from './lib/dateUtils.ts';
 import {
+  doesAppMatchPortal,
   findDuplicateApplication,
   mapSourceToPortalId,
   normalizePortalSource,
@@ -103,6 +106,9 @@ export default function App() {
   const [connectedPortals, setConnectedPortals] = useState<ConnectedPortalRecord[]>([]);
   const [gmailConfirmations, setGmailConfirmations] = useState<GmailConfirmationRecord[]>([]);
   const [applicationsPortalFilter, setApplicationsPortalFilter] = useState('All');
+  const [appsSynced, setAppsSynced] = useState(false);
+  const [confirmationsSynced, setConfirmationsSynced] = useState(false);
+  const autoScanRanRef = useRef(false);
 
   const [notice, setNotice] = useState('');
   const [errorBanner, setErrorBanner] = useState('');
@@ -132,6 +138,9 @@ export default function App() {
       setEmailReplies([]);
       setConnectedPortals([]);
       setGmailConfirmations([]);
+      setAppsSynced(false);
+      setConfirmationsSynced(false);
+      autoScanRanRef.current = false;
       return;
     }
 
@@ -154,7 +163,12 @@ export default function App() {
       subscribeCollection<JobApplicationRecord>(
         user.uid,
         'jobApplications',
-        (d) => !cancelled && setApplications(d),
+        (d) => {
+          if (!cancelled) {
+            setApplications(d);
+            setAppsSynced(true);
+          }
+        },
         onDbErr
       ),
       subscribeCollection<ApplicationResumeRecord>(
@@ -198,7 +212,12 @@ export default function App() {
       subscribeCollection<GmailConfirmationRecord>(
         user.uid,
         'gmailConfirmations',
-        (d) => !cancelled && setGmailConfirmations(d),
+        (d) => {
+          if (!cancelled) {
+            setGmailConfirmations(d);
+            setConfirmationsSynced(true);
+          }
+        },
         onDbErr
       ),
     ];
@@ -217,7 +236,7 @@ export default function App() {
 
   // Handle ?extCapture=<base64url> fallback handoff from the Chrome Extension
   useEffect(() => {
-    if (!user || typeof window === 'undefined') return;
+    if (!user || !appsSynced || typeof window === 'undefined') return;
     const params = new URLSearchParams(window.location.search);
     const rawExt = params.get('extCapture');
     if (!rawExt) return;
@@ -313,7 +332,236 @@ export default function App() {
       cleanUrl();
       setErrorBanner('Could not decode captured job payload from browser extension.');
     }
-  }, [user?.uid]);
+  }, [user?.uid, appsSynced]);
+
+  // Optional session auto-scan for job confirmation emails when enabled
+  useEffect(() => {
+    const conn = emailConnections[0];
+    if (
+      !user ||
+      !appsSynced ||
+      !confirmationsSynced ||
+      !hasGmailToken ||
+      !conn?.autoProcessConfirmations ||
+      autoScanRanRef.current
+    ) {
+      return;
+    }
+
+    autoScanRanRef.current = true;
+    let cancelled = false;
+
+    void (async () => {
+      try {
+        const existingIds = Array.from(
+          new Set([
+            ...gmailConfirmations.map((c) => c.gmailMessageId),
+            ...applications.map((a) => a.gmailConfirmationMessageId || '').filter(Boolean),
+          ])
+        );
+
+        const res = await scanGmailConfirmationsApi({ existingMessageIds: existingIds });
+        if (cancelled || res.confirmations.length === 0) return;
+
+        let imported = 0;
+        let pending = 0;
+        const workingApps = [...applications];
+        const followDays = profile?.defaultFollowUpDays ?? 7;
+        const nowIso = new Date().toISOString();
+
+        for (const item of res.confirmations) {
+          if (!item.isConfirmedApplication || item.confidence === 'not_application') {
+            await saveGmailConfirmationRecord(user.uid, {
+              gmailMessageId: item.gmailMessageId,
+              gmailThreadId: item.gmailThreadId,
+              fromEmail: item.fromEmail,
+              subject: item.subject,
+              snippet: item.snippet,
+              receivedAt: item.receivedAt,
+              isConfirmedApplication: false,
+              confidence: 'not_application',
+              companyName: '',
+              jobTitle: '',
+              jobLocation: '',
+              jobUrl: '',
+              applicationSource: item.applicationSource || 'Job Portal',
+              applicationDate: item.applicationDate,
+              confirmationMessage: '',
+              recruiterName: '',
+              recruiterEmail: '',
+              reviewStatus: 'dismissed',
+              linkedApplicationId: '',
+            });
+            continue;
+          }
+
+          const normSource = normalizePortalSource(
+            item.applicationSource,
+            `${item.fromEmail} ${item.jobUrl}`
+          );
+          const dup = findDuplicateApplication(
+            {
+              userId: user.uid,
+              companyName: item.companyName,
+              jobTitle: item.jobTitle,
+              jobUrl: item.jobUrl,
+              dateApplied: item.applicationDate,
+              gmailConfirmationMessageId: item.gmailMessageId,
+            },
+            workingApps
+          );
+
+          if (dup.isDuplicate && dup.matchedApplication) {
+            await saveGmailConfirmationRecord(user.uid, {
+              gmailMessageId: item.gmailMessageId,
+              gmailThreadId: item.gmailThreadId,
+              fromEmail: item.fromEmail,
+              subject: item.subject,
+              snippet: item.snippet,
+              receivedAt: item.receivedAt,
+              isConfirmedApplication: true,
+              confidence: item.confidence,
+              companyName: item.companyName,
+              jobTitle: item.jobTitle,
+              jobLocation: item.jobLocation,
+              jobUrl: item.jobUrl,
+              applicationSource: normSource,
+              applicationDate: item.applicationDate,
+              confirmationMessage: item.confirmationMessage,
+              recruiterName: item.recruiterName,
+              recruiterEmail: item.recruiterEmail,
+              reviewStatus: 'duplicate_skipped',
+              linkedApplicationId: dup.matchedApplication.id,
+            });
+            continue;
+          }
+
+          if (item.confidence === 'high' && item.companyName && item.jobTitle) {
+            const applied = item.applicationDate || getTodayIsoDate();
+            const followUpDate = addCalendarDays(applied, followDays);
+            const appId = await saveManualApplicationRecord({
+              uid: user.uid,
+              companyName: item.companyName,
+              jobTitle: item.jobTitle,
+              jobDescription: `Confirmed application via ${normSource}.\n\nEmail: ${item.subject}\n${item.confirmationMessage || item.snippet}`,
+              jobLocation: item.jobLocation || 'Not specified',
+              jobUrl: item.jobUrl,
+              hrEmail: item.recruiterEmail,
+              recruiterName: item.recruiterName,
+              applicationSource: normSource,
+              captureMethod: 'gmail_confirmation',
+              confirmationEvidence: item.confirmationMessage || item.subject,
+              needsReview: false,
+              gmailConfirmationMessageId: item.gmailMessageId,
+              dateApplied: applied,
+              followUpDate,
+              applicationStatus: 'Applied – Confirmed',
+              notes: `Auto-detected from Gmail confirmation (${item.fromEmail}).`,
+              aiSummary: `Confirmed submission detected on ${normSource} via Gmail receipt.`,
+              keyRequirements: [],
+            });
+            workingApps.push({
+              id: appId,
+              userId: user.uid,
+              companyName: item.companyName,
+              jobTitle: item.jobTitle,
+              jobDescription: '',
+              jobLocation: item.jobLocation,
+              jobUrl: item.jobUrl,
+              hrEmail: item.recruiterEmail,
+              applicationSource: normSource,
+              applicationMethod: 'portal',
+              captureMethod: 'gmail_confirmation',
+              gmailConfirmationMessageId: item.gmailMessageId,
+              dateApplied: applied,
+              lastCommunicationDate: applied,
+              followUpDate,
+              applicationStatus: 'Applied – Confirmed',
+              notes: '',
+              aiSummary: '',
+              keyRequirements: [],
+              applicationResumeId: '',
+              gmailThreadId: item.gmailThreadId,
+            });
+            await saveGmailConfirmationRecord(user.uid, {
+              gmailMessageId: item.gmailMessageId,
+              gmailThreadId: item.gmailThreadId,
+              fromEmail: item.fromEmail,
+              subject: item.subject,
+              snippet: item.snippet,
+              receivedAt: item.receivedAt,
+              isConfirmedApplication: true,
+              confidence: 'high',
+              companyName: item.companyName,
+              jobTitle: item.jobTitle,
+              jobLocation: item.jobLocation,
+              jobUrl: item.jobUrl,
+              applicationSource: normSource,
+              applicationDate: applied,
+              confirmationMessage: item.confirmationMessage,
+              recruiterName: item.recruiterName,
+              recruiterEmail: item.recruiterEmail,
+              reviewStatus: 'imported',
+              linkedApplicationId: appId,
+            });
+            const pId = mapSourceToPortalId(normSource);
+            if (pId) {
+              await upsertConnectedPortalState({
+                uid: user.uid,
+                portalId: pId,
+                updates: {
+                  status: 'connected',
+                  connectionMethod: 'gmail_confirmation',
+                  gmailDetectionEnabled: true,
+                  gmailVerifiedAt: nowIso,
+                  lastTestedAt: nowIso,
+                  lastSyncedAt: nowIso,
+                  importedCount: workingApps.filter((a) => doesAppMatchPortal(a, pId)).length,
+                  lastSyncSummary: `Auto-detected confirmation: ${item.jobTitle} at ${item.companyName}`,
+                },
+              });
+            }
+            imported++;
+          } else {
+            await saveGmailConfirmationRecord(user.uid, {
+              gmailMessageId: item.gmailMessageId,
+              gmailThreadId: item.gmailThreadId,
+              fromEmail: item.fromEmail,
+              subject: item.subject,
+              snippet: item.snippet,
+              receivedAt: item.receivedAt,
+              isConfirmedApplication: true,
+              confidence: 'incomplete',
+              companyName: item.companyName,
+              jobTitle: item.jobTitle,
+              jobLocation: item.jobLocation,
+              jobUrl: item.jobUrl,
+              applicationSource: normSource,
+              applicationDate: item.applicationDate || getTodayIsoDate(),
+              confirmationMessage: item.confirmationMessage || item.subject,
+              recruiterName: item.recruiterName,
+              recruiterEmail: item.recruiterEmail,
+              reviewStatus: 'pending_review',
+              linkedApplicationId: '',
+            });
+            pending++;
+          }
+        }
+
+        if (!cancelled && (imported > 0 || pending > 0)) {
+          setNotice(
+            `Auto-detected ${imported} confirmed portal application(s)${pending > 0 ? ` and ${pending} item(s) for review in Connected Portals` : ''}.`
+          );
+        }
+      } catch {
+        // Silent background check failure — user can still manually trigger scan in Connected Portals
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [user?.uid, appsSynced, confirmationsSynced, hasGmailToken, emailConnections]);
 
   const handleSignIn = async () => {
     setSigningIn(true);

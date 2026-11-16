@@ -3,6 +3,125 @@ import { getFirebaseIdToken, getGmailAccessToken } from './firebase.ts';
 
 const API_BASE = ((import.meta.env.VITE_API_BASE_URL as string | undefined) || '').replace(/\/+$/, '');
 
+interface ClientCacheRecord<T> {
+  value: T;
+  expiresAt: number;
+}
+
+const CLIENT_CACHE_STORAGE_KEY = 'myjobtracker_ai_buffer_v1';
+const MAX_CLIENT_CACHE_ENTRIES = 60;
+const clientMemoryBuffer = new Map<string, ClientCacheRecord<unknown>>();
+const inFlightClientRequests = new Map<string, Promise<unknown>>();
+let storageHydrated = false;
+
+function fnv1aHash(input: string): string {
+  let hash = 0x811c9dc5;
+  for (let i = 0; i < input.length; i++) {
+    hash ^= input.charCodeAt(i);
+    hash = Math.imul(hash, 0x01000193);
+  }
+  return (hash >>> 0).toString(16).padStart(8, '0');
+}
+
+function hydrateClientBuffer(): void {
+  if (storageHydrated) return;
+  storageHydrated = true;
+  if (typeof window === 'undefined' || !window.sessionStorage) return;
+  try {
+    const raw = window.sessionStorage.getItem(CLIENT_CACHE_STORAGE_KEY);
+    if (!raw) return;
+    const parsed = JSON.parse(raw) as Array<[string, ClientCacheRecord<unknown>]>;
+    if (!Array.isArray(parsed)) return;
+    const now = Date.now();
+    for (const [k, v] of parsed) {
+      if (k && v && typeof v.expiresAt === 'number' && v.expiresAt > now) {
+        clientMemoryBuffer.set(k, v);
+      }
+    }
+  } catch {
+    // ignore corrupted sessionStorage
+  }
+}
+
+function persistClientBuffer(): void {
+  if (typeof window === 'undefined' || !window.sessionStorage) return;
+  try {
+    const now = Date.now();
+    const list: Array<[string, ClientCacheRecord<unknown>]> = [];
+    for (const [k, v] of clientMemoryBuffer) {
+      if (v.expiresAt > now) {
+        list.push([k, v]);
+      } else {
+        clientMemoryBuffer.delete(k);
+      }
+    }
+    window.sessionStorage.setItem(CLIENT_CACHE_STORAGE_KEY, JSON.stringify(list));
+  } catch {
+    // ignore storage quota exceeded
+  }
+}
+
+function makeClientCacheKey(namespace: string, payload: unknown): string {
+  if (payload && typeof payload === 'object' && !Array.isArray(payload)) {
+    const clean = { ...(payload as Record<string, unknown>) };
+    delete clean.bypassCache;
+    return `${namespace}:${fnv1aHash(JSON.stringify(clean))}`;
+  }
+  return `${namespace}:${fnv1aHash(JSON.stringify(payload))}`;
+}
+
+async function cachedApiRequest<T>(
+  namespace: string,
+  url: string,
+  payload: unknown,
+  options?: {
+    ttlMs?: number;
+    bypassCache?: boolean;
+    shouldCache?: (value: T) => boolean;
+  }
+): Promise<T> {
+  hydrateClientBuffer();
+  const key = makeClientCacheKey(namespace, payload);
+  const ttlMs = options?.ttlMs ?? 60 * 60 * 1000;
+
+  if (!options?.bypassCache) {
+    const existing = clientMemoryBuffer.get(key);
+    if (existing && Date.now() <= existing.expiresAt) {
+      // Touch LRU order
+      clientMemoryBuffer.delete(key);
+      clientMemoryBuffer.set(key, existing);
+      return existing.value as T;
+    }
+  }
+
+  const inflight = inFlightClientRequests.get(key) as Promise<T> | undefined;
+  if (inflight) {
+    return inflight;
+  }
+
+  const reqPromise = apiRequest<T>(url, payload)
+    .then((result) => {
+      const allow = options?.shouldCache ? options.shouldCache(result) : true;
+      if (allow) {
+        if (clientMemoryBuffer.has(key)) clientMemoryBuffer.delete(key);
+        while (clientMemoryBuffer.size >= MAX_CLIENT_CACHE_ENTRIES) {
+          const oldest = clientMemoryBuffer.keys().next().value;
+          if (oldest === undefined) break;
+          clientMemoryBuffer.delete(oldest);
+        }
+        clientMemoryBuffer.set(key, { value: result, expiresAt: Date.now() + ttlMs });
+        persistClientBuffer();
+      }
+      return result;
+    })
+    .finally(() => {
+      inFlightClientRequests.delete(key);
+    });
+
+  inFlightClientRequests.set(key, reqPromise);
+  return reqPromise;
+}
+
 async function apiRequest<T>(
   url: string,
   body: unknown,
@@ -58,6 +177,35 @@ export function parseResumeApi(pdfBase64: string) {
   }>('/api/resume/parse', { pdfBase64 });
 }
 
+export function buildResumePdfApi(payload: {
+  candidateName: string;
+  candidateEmail: string;
+  candidatePhone: string;
+  originalLocation: string;
+  resumeText: string;
+  fileName?: string;
+}) {
+  return apiRequest<{
+    pdfBase64: string;
+    fileName: string;
+    fileSize: number;
+    extractedText: string;
+    candidateName: string;
+    candidateEmail: string;
+    candidatePhone: string;
+    originalLocation: string;
+    locationBox: {
+      hasLocationBox: boolean;
+      locPage: number;
+      locX: number;
+      locY: number;
+      locW: number;
+      locH: number;
+      locFontSize: number;
+    };
+  }>('/api/resume/build-pdf', payload);
+}
+
 export function tailorResumeApi(payload: {
   originalPdfBase64: string;
   extractedText: string;
@@ -108,8 +256,22 @@ export function generateApplicationEmailApi(payload: {
   responsibilities?: string[];
   applicationInstructions?: string;
   emailType?: EmailPurposeType;
+  bypassCache?: boolean;
 }) {
-  return apiRequest<{ subject: string; body: string }>('/api/ai/generate-email', payload);
+  const { bypassCache, ...cacheablePayload } = payload;
+  return cachedApiRequest<{ subject: string; body: string }>(
+    'email_generate',
+    '/api/ai/generate-email',
+    payload,
+    {
+      ttlMs: 30 * 60 * 1000,
+      bypassCache,
+      shouldCache: (res) => Boolean(res.body?.trim()),
+    }
+  ).catch((err) => {
+    void cacheablePayload;
+    throw err;
+  });
 }
 
 export function analyzeManualJdApi(payload: {
@@ -118,14 +280,21 @@ export function analyzeManualJdApi(payload: {
   jobLocation: string;
   jobDescription: string;
 }) {
-  return apiRequest<{ aiSummary: string; keyRequirements: string[] }>(
+  return cachedApiRequest<{ aiSummary: string; keyRequirements: string[] }>(
+    'job_analyze_jd',
     '/api/ai/analyze-jd',
-    payload
+    payload,
+    { ttlMs: 60 * 60 * 1000 }
   );
 }
 
 export function parseJobInputApi(rawText: string) {
-  return apiRequest<ExtractedJobDetails>('/api/ai/parse-job-input', { rawText });
+  return cachedApiRequest<ExtractedJobDetails>(
+    'job_parse',
+    '/api/ai/parse-job-input',
+    { rawText },
+    { ttlMs: 60 * 60 * 1000 }
+  );
 }
 
 export function findHrContactApi(payload: {
@@ -133,12 +302,15 @@ export function findHrContactApi(payload: {
   jobLocation?: string;
   jobUrl?: string;
 }) {
-  return apiRequest<{
+  return cachedApiRequest<{
     hrEmail: string;
     sourceTitle: string;
     sourceUrl: string;
     message: string;
-  }>('/api/ai/find-hr-contact', payload);
+  }>('hr_lookup', '/api/ai/find-hr-contact', payload, {
+    ttlMs: 60 * 60 * 1000,
+    shouldCache: (res) => Boolean(res.hrEmail),
+  });
 }
 
 export function generateFollowUpEmailApi(payload: {
@@ -149,8 +321,18 @@ export function generateFollowUpEmailApi(payload: {
   originalEmailSubject?: string;
   originalEmailBody?: string;
   previousFollowUps?: string[];
+  bypassCache?: boolean;
 }) {
-  return apiRequest<{ subject: string; body: string }>('/api/ai/generate-followup', payload);
+  return cachedApiRequest<{ subject: string; body: string }>(
+    'email_followup',
+    '/api/ai/generate-followup',
+    payload,
+    {
+      ttlMs: 30 * 60 * 1000,
+      bypassCache: payload.bypassCache,
+      shouldCache: (res) => Boolean(res.body?.trim()),
+    }
+  );
 }
 
 export function sendGmailEmailApi(payload: {

@@ -8,7 +8,21 @@ import {
   Clock,
   ArrowRight,
   Link2,
+  BarChart3,
+  TrendingUp,
 } from 'lucide-react';
+import {
+  ResponsiveContainer,
+  BarChart,
+  Bar,
+  LineChart,
+  Line,
+  XAxis,
+  YAxis,
+  CartesianGrid,
+  Tooltip,
+  Cell,
+} from 'recharts';
 import type {
   EmailConnectionRecord,
   EmailReplyRecord,
@@ -16,6 +30,7 @@ import type {
   ResumeRecord,
 } from '../types.ts';
 import {
+  addCalendarDays,
   formatReadableDate,
   getTodayIsoDate,
   isFollowUpDue,
@@ -130,6 +145,127 @@ export function DashboardView({
   );
 
   const unreviewedReplies = replies.filter((r) => !r.reviewed).length;
+
+  const statusChartData = useMemo(() => {
+    const statusOrder = [
+      'Discovered',
+      'Saved',
+      'Awaiting Confirmation',
+      'Applied – Manually Recorded',
+      'Applied – Confirmed',
+      'Applied',
+      'Email Sent',
+      'Waiting for Response',
+      'Follow-up Due',
+      'HR Responded',
+      'Interview Scheduled',
+      'Offer Received',
+      'Rejected',
+    ];
+
+    const statusColors: Record<string, string> = {
+      Discovered: '#64748b',
+      Saved: '#475569',
+      'Awaiting Confirmation': '#d97706',
+      'Applied – Manually Recorded': '#1d4ed8',
+      'Applied – Confirmed': '#059669',
+      Applied: '#2563eb',
+      'Email Sent': '#1d4ed8',
+      'Waiting for Response': '#0284c7',
+      'Follow-up Due': '#d97706',
+      'HR Responded': '#0d9488',
+      'Interview Scheduled': '#10b981',
+      'Offer Received': '#047857',
+      Rejected: '#dc2626',
+    };
+
+    const counts = new Map<string, number>();
+    for (const app of applications) {
+      const status = app.applicationStatus || 'Applied';
+      counts.set(status, (counts.get(status) ?? 0) + 1);
+    }
+
+    const orderedStatuses = [
+      ...statusOrder.filter((s) => counts.has(s)),
+      ...Array.from(counts.keys()).filter((s) => !statusOrder.includes(s)),
+    ];
+
+    return orderedStatuses.map((status) => ({
+      status,
+      count: counts.get(status) ?? 0,
+      color: statusColors[status] ?? '#1d4ed8',
+    }));
+  }, [applications]);
+
+  const timelineChartData = useMemo(() => {
+    const validDates = applications
+      .map((a) => (a.dateApplied || '').trim().slice(0, 10))
+      .filter((d) => /^\d{4}-\d{2}-\d{2}$/.test(d))
+      .sort();
+
+    if (validDates.length === 0) {
+      return { granularity: 'daily' as const, points: [] as Array<{ label: string; fullDate: string; count: number; cumulative: number }> };
+    }
+
+    const countsByDay = new Map<string, number>();
+    for (const d of validDates) {
+      countsByDay.set(d, (countsByDay.get(d) ?? 0) + 1);
+    }
+
+    const minDate = validDates[0];
+    const maxAppDate = validDates[validDates.length - 1];
+    const endDate = maxAppDate > today ? maxAppDate : today;
+    const minWindowStart = addCalendarDays(endDate, -6);
+    const startDate = minDate < minWindowStart ? minDate : minWindowStart;
+
+    const msPerDay = 24 * 60 * 60 * 1000;
+    const spanDays = Math.round(
+      (Date.parse(`${endDate}T00:00:00Z`) - Date.parse(`${startDate}T00:00:00Z`)) / msPerDay
+    );
+
+    const monthShort = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+
+    if (spanDays <= 45) {
+      const points: Array<{ label: string; fullDate: string; count: number; cumulative: number }> = [];
+      let running = 0;
+      for (let offset = 0; offset <= spanDays; offset++) {
+        const iso = addCalendarDays(startDate, offset);
+        const dayCount = countsByDay.get(iso) ?? 0;
+        running += dayCount;
+        const [, mm, dd] = iso.split('-');
+        const mLabel = monthShort[Math.max(0, Number(mm) - 1)] ?? mm;
+        points.push({
+          label: `${mLabel} ${Number(dd)}`,
+          fullDate: formatReadableDate(iso),
+          count: dayCount,
+          cumulative: running,
+        });
+      }
+      return { granularity: 'daily' as const, points };
+    }
+
+    // Longer histories (> 45 days): group chronologically by month
+    const countsByMonth = new Map<string, number>();
+    for (const d of validDates) {
+      const ym = d.slice(0, 7);
+      countsByMonth.set(ym, (countsByMonth.get(ym) ?? 0) + 1);
+    }
+    const sortedMonths = Array.from(countsByMonth.keys()).sort();
+    let running = 0;
+    const points = sortedMonths.map((ym) => {
+      const monthCount = countsByMonth.get(ym) ?? 0;
+      running += monthCount;
+      const [yyyy, mm] = ym.split('-');
+      const mLabel = monthShort[Math.max(0, Number(mm) - 1)] ?? mm;
+      return {
+        label: `${mLabel} '${yyyy.slice(2)}`,
+        fullDate: `${mLabel} ${yyyy}`,
+        count: monthCount,
+        cumulative: running,
+      };
+    });
+    return { granularity: 'monthly' as const, points };
+  }, [applications, today]);
 
   const primaryKpis: Array<{
     label: string;
@@ -331,6 +467,146 @@ export function DashboardView({
               </div>
             </button>
           ))}
+        </div>
+      </div>
+
+      {/* Pipeline Analytics Charts */}
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+        {/* Bar Chart: Applications by Status */}
+        <div className="bg-white border border-slate-200 rounded-xl p-5 space-y-4">
+          <div className="flex items-center justify-between gap-2">
+            <div className="flex items-center gap-2">
+              <BarChart3 className="w-4 h-4 text-blue-700" />
+              <h3 className="text-sm font-semibold text-slate-900">Applications by Status</h3>
+            </div>
+            <span className="text-xs text-slate-500 font-mono tabular-nums">
+              {applications.length} total
+            </span>
+          </div>
+
+          {statusChartData.length === 0 ? (
+            <div className="h-64 flex items-center justify-center border border-dashed border-slate-200 rounded-lg bg-slate-50/50 px-4 text-center">
+              <p className="text-xs text-slate-500">
+                No applications recorded yet. Status distribution will appear here once you add an application.
+              </p>
+            </div>
+          ) : (
+            <div className="h-64 w-full min-w-0">
+              <ResponsiveContainer width="100%" height="100%" minWidth={0}>
+                <BarChart
+                  data={statusChartData}
+                  layout="vertical"
+                  margin={{ top: 4, right: 20, left: 8, bottom: 4 }}
+                >
+                  <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" horizontal={false} />
+                  <XAxis
+                    type="number"
+                    allowDecimals={false}
+                    tick={{ fontSize: 11, fill: '#64748b' }}
+                    axisLine={{ stroke: '#cbd5e1' }}
+                    tickLine={false}
+                  />
+                  <YAxis
+                    type="category"
+                    dataKey="status"
+                    width={168}
+                    tick={{ fontSize: 11, fill: '#334155' }}
+                    axisLine={false}
+                    tickLine={false}
+                  />
+                  <Tooltip
+                    cursor={{ fill: '#f8fafc' }}
+                    contentStyle={{
+                      backgroundColor: '#ffffff',
+                      borderColor: '#e2e8f0',
+                      borderRadius: '0.5rem',
+                      fontSize: '12px',
+                      boxShadow: '0 4px 6px -1px rgb(0 0 0 / 0.08)',
+                    }}
+                    formatter={(value) => [`${value ?? 0} application(s)`, 'Count']}
+                  />
+                  <Bar dataKey="count" name="Applications" radius={[0, 4, 4, 0]} maxBarSize={24}>
+                    {statusChartData.map((entry) => (
+                      <Cell key={entry.status} fill={entry.color} />
+                    ))}
+                  </Bar>
+                </BarChart>
+              </ResponsiveContainer>
+            </div>
+          )}
+        </div>
+
+        {/* Trend Line: Applications over Time */}
+        <div className="bg-white border border-slate-200 rounded-xl p-5 space-y-4">
+          <div className="flex items-center justify-between gap-2">
+            <div className="flex items-center gap-2">
+              <TrendingUp className="w-4 h-4 text-blue-700" />
+              <h3 className="text-sm font-semibold text-slate-900">Applications over Time</h3>
+            </div>
+            <span className="text-xs text-slate-500">
+              {timelineChartData.granularity === 'monthly' ? 'Monthly trend' : 'Daily trend'}
+            </span>
+          </div>
+
+          {timelineChartData.points.length === 0 ? (
+            <div className="h-64 flex items-center justify-center border border-dashed border-slate-200 rounded-lg bg-slate-50/50 px-4 text-center">
+              <p className="text-xs text-slate-500">
+                No dated applications yet. Your submission trend line will appear here after your first application.
+              </p>
+            </div>
+          ) : (
+            <div className="h-64 w-full min-w-0">
+              <ResponsiveContainer width="100%" height="100%" minWidth={0}>
+                <LineChart
+                  data={timelineChartData.points}
+                  margin={{ top: 8, right: 20, left: 0, bottom: 4 }}
+                >
+                  <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" vertical={false} />
+                  <XAxis
+                    dataKey="label"
+                    tick={{ fontSize: 11, fill: '#64748b' }}
+                    axisLine={{ stroke: '#cbd5e1' }}
+                    tickLine={false}
+                    minTickGap={16}
+                  />
+                  <YAxis
+                    allowDecimals={false}
+                    width={32}
+                    tick={{ fontSize: 11, fill: '#64748b' }}
+                    axisLine={false}
+                    tickLine={false}
+                  />
+                  <Tooltip
+                    contentStyle={{
+                      backgroundColor: '#ffffff',
+                      borderColor: '#e2e8f0',
+                      borderRadius: '0.5rem',
+                      fontSize: '12px',
+                      boxShadow: '0 4px 6px -1px rgb(0 0 0 / 0.08)',
+                    }}
+                    labelFormatter={(_, payload) =>
+                      payload && payload[0]?.payload?.fullDate
+                        ? String(payload[0].payload.fullDate)
+                        : ''
+                    }
+                    formatter={(value, name) => [
+                      `${value ?? 0} application(s)`,
+                      name === 'cumulative' ? 'Cumulative Total' : 'Submitted',
+                    ]}
+                  />
+                  <Line
+                    type="monotone"
+                    dataKey="count"
+                    name="Submitted"
+                    stroke="#1d4ed8"
+                    strokeWidth={2.5}
+                    dot={{ r: 3.5, fill: '#1d4ed8', strokeWidth: 1.5, stroke: '#ffffff' }}
+                    activeDot={{ r: 5.5, fill: '#1d4ed8', strokeWidth: 2, stroke: '#ffffff' }}
+                  />
+                </LineChart>
+              </ResponsiveContainer>
+            </div>
+          )}
         </div>
       </div>
 

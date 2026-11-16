@@ -21,7 +21,7 @@ import type {
   EmailConnectionRecord,
   GmailConfirmationRecord,
   JobApplicationRecord,
-  PortalConnectionRecord,
+  ConnectedPortalRecord,
   PortalId,
 } from '../types.ts';
 import { addCalendarDays, formatReadableDate, getTodayIsoDate } from '../lib/dateUtils.ts';
@@ -62,7 +62,7 @@ interface ConnectedPortalsViewProps {
   userEmail: string;
   defaultFollowUpDays: number;
   applications: JobApplicationRecord[];
-  connectedPortals: PortalConnectionRecord[];
+  connectedPortals: ConnectedPortalRecord[];
   gmailConfirmations: GmailConfirmationRecord[];
   emailConnection: EmailConnectionRecord | null;
   hasGmailSessionToken: boolean;
@@ -111,7 +111,7 @@ export function ConnectedPortalsView({
   >({});
 
   const portalMap = useMemo(() => {
-    const map = new Map<PortalId, PortalConnectionRecord>();
+    const map = new Map<PortalId, ConnectedPortalRecord>();
     for (const p of connectedPortals) {
       map.set(p.portalId, p);
     }

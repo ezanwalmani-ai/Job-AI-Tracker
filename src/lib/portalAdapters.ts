@@ -1,7 +1,7 @@
 import type {
   ApplicationStatus,
   JobApplicationRecord,
-  PortalConnectionRecord,
+  ConnectedPortalRecord,
   PortalId,
 } from '../types.ts';
 import { getTodayIsoDate } from './dateUtils.ts';
@@ -509,8 +509,8 @@ export function parsePortalExportCsv(params: {
 export function buildDefaultPortalRecord(
   uid: string,
   adapter: PortalAdapterDefinition,
-  existing?: PortalConnectionRecord | null
-): PortalConnectionRecord {
+  existing?: ConnectedPortalRecord | null
+): ConnectedPortalRecord {
   if (existing) return existing;
   return {
     id: adapter.portalId,

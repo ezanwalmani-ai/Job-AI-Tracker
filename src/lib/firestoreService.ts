@@ -24,7 +24,7 @@ import type {
   FollowUpRecord,
   EmailConnectionRecord,
   EmailReplyRecord,
-  PortalConnectionRecord,
+  ConnectedPortalRecord,
   GmailConfirmationRecord,
   CaptureMethod,
   PortalId,
@@ -307,6 +307,33 @@ export async function switchActiveMasterResume(
       }
     }
     await updateUserProfile(uid, { activeResumeId: targetResumeId });
+  } catch (error) {
+    handleFirestoreError(error, OperationType.UPDATE, path);
+  }
+}
+
+export async function updateManualResumeDetails(params: {
+  uid: string;
+  resumeId: string;
+  fileName: string;
+  candidateName: string;
+  candidateEmail: string;
+  candidatePhone: string;
+  originalLocation: string;
+  extractedText: string;
+}): Promise<void> {
+  const path = `users/${params.uid}/resumes/${params.resumeId}`;
+  const cleanFileName = (params.fileName.trim() || 'Master_Resume.pdf').slice(0, 255);
+  try {
+    await updateDoc(doc(db, 'users', params.uid, 'resumes', params.resumeId), {
+      fileName: cleanFileName,
+      candidateName: params.candidateName.trim().slice(0, 200),
+      candidateEmail: params.candidateEmail.trim().slice(0, 320),
+      candidatePhone: params.candidatePhone.trim().slice(0, 60),
+      originalLocation: params.originalLocation.trim().slice(0, 300),
+      extractedText: params.extractedText.trim().slice(0, 200000),
+      updatedAt: serverTimestamp(),
+    });
   } catch (error) {
     handleFirestoreError(error, OperationType.UPDATE, path);
   }
@@ -725,7 +752,7 @@ export async function upsertConnectedPortalState(params: {
   uid: string;
   portalId: PortalId;
   updates: Partial<
-    Omit<PortalConnectionRecord, 'id' | 'userId' | 'portalId' | 'updatedAt'>
+    Omit<ConnectedPortalRecord, 'id' | 'userId' | 'portalId' | 'updatedAt'>
   >;
 }): Promise<void> {
   const adapter = getPortalAdapter(params.portalId);
@@ -734,7 +761,7 @@ export async function upsertConnectedPortalState(params: {
   try {
     const snap = await getDoc(ref);
     if (snap.exists()) {
-      const prev = snap.data() as PortalConnectionRecord;
+      const prev = snap.data() as ConnectedPortalRecord;
       await updateDoc(ref, {
         portalName: (params.updates.portalName ?? prev.portalName ?? adapter.portalName).slice(0, 120),
         status: params.updates.status ?? prev.status,
@@ -752,7 +779,7 @@ export async function upsertConnectedPortalState(params: {
         updatedAt: serverTimestamp(),
       });
     } else {
-      const record: PortalConnectionRecord = {
+      const record: ConnectedPortalRecord = {
         id: params.portalId,
         userId: params.uid,
         portalId: params.portalId,

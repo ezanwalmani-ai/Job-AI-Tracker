@@ -379,7 +379,31 @@ service cloud.firestore {
           && incoming().userId == existing().userId
           && incoming().createdAt == existing().createdAt
           && incoming().updatedAt == request.time
-          && incoming().diff(existing()).affectedKeys().hasOnly(['isActive', 'updatedAt']);
+          && (
+            // Action: Switch active master version
+            incoming().diff(existing()).affectedKeys().hasOnly(['isActive', 'updatedAt'])
+            ||
+            // Action: Manual resume metadata and text edit (preserves original PDF chunks & version)
+            (
+              incoming().version == existing().version
+              && incoming().mimeType == existing().mimeType
+              && incoming().fileSize == existing().fileSize
+              && incoming().chunkCount == existing().chunkCount
+              && incoming().uploadedAt == existing().uploadedAt
+              && incoming().isActive == existing().isActive
+              && incoming().hasLocationBox == existing().hasLocationBox
+              && incoming().locPage == existing().locPage
+              && incoming().locX == existing().locX
+              && incoming().locY == existing().locY
+              && incoming().locW == existing().locW
+              && incoming().locH == existing().locH
+              && incoming().locFontSize == existing().locFontSize
+              && incoming().diff(existing()).affectedKeys().hasOnly([
+                'fileName', 'candidateName', 'candidateEmail', 'candidatePhone',
+                'originalLocation', 'extractedText', 'updatedAt'
+              ])
+            )
+          );
         allow delete: if isVerifiedOwner(userId) && isValidId(resumeId);
 
         match /chunks/{chunkId} {

@@ -559,6 +559,7 @@ export function ApplyForJobView({
         responsibilities: extracted?.responsibilities,
         applicationInstructions: applicationInstructions.trim() || undefined,
         emailType: activeType,
+        bypassCache: !overrideType,
       });
       setEmailDraft((prev) => ({
         recipientEmail: prev?.recipientEmail ?? hrEmail.trim(),

@@ -1,6 +1,20 @@
-import { GoogleGenAI, Type, ThinkingLevel } from '@google/genai';
+import { GoogleGenAI, Type, ThinkingLevel, type GenerateContentParameters } from '@google/genai';
 import type { EmailPurposeType } from '../types.ts';
 import { normalizeJobLocationToCityState } from './pdfService.ts';
+import { aiCacheBuffer } from './aiCacheBuffer.ts';
+import {
+  isQuotaOrRateLimitError,
+  findCompanyHrContactFreeWeb,
+  extractCandidateInfoFallback,
+  prepareLocationAndJdFallback,
+  analyzeManualJdFallback,
+  parseRawJobInputFallback,
+  generateApplicationEmailFallback,
+  generateFollowUpEmailFallback,
+  classifyRepliesFallback,
+  isLikelyNonApplicationDigest,
+  detectPortalConfirmationsFallback,
+} from './freeFallbacks.ts';
 
 const ai = new GoogleGenAI({
   apiKey: process.env.GEMINI_API_KEY,
@@ -11,7 +25,65 @@ const ai = new GoogleGenAI({
   },
 });
 
-const MODEL = 'gemini-4-hydrogen';
+const MODEL_PRIMARY_TEXT = 'gemini-4-hydrogen';
+const MODEL_FAST_LITE = 'gemini-3.1-flash-lite';
+
+// Brief per-model cooldown (ms) after hitting free-tier quota so repeated searches switch cleanly
+// to the alternative model or built-in free engine without stalling.
+const MODEL_QUOTA_COOLDOWN_MS = 90 * 1000;
+const modelCooldownUntil = new Map<string, number>();
+
+const TTL_24H = 24 * 60 * 60 * 1000;
+const TTL_12H = 12 * 60 * 60 * 1000;
+const TTL_6H = 6 * 60 * 60 * 1000;
+const TTL_2H = 2 * 60 * 60 * 1000;
+const TTL_30M = 30 * 60 * 1000;
+
+function isModelInCooldown(model: string): boolean {
+  const until = modelCooldownUntil.get(model) ?? 0;
+  return Date.now() < until;
+}
+
+function markModelCooldown(model: string): void {
+  modelCooldownUntil.set(model, Date.now() + MODEL_QUOTA_COOLDOWN_MS);
+}
+
+async function generateWithFallback(
+  modelOrder: string[],
+  buildConfig: (
+    model: string,
+    thinkingLevel: ThinkingLevel
+  ) => Omit<GenerateContentParameters, 'model'>
+) {
+  let lastErr: unknown = null;
+
+  for (const model of modelOrder) {
+    if (isModelInCooldown(model)) continue;
+
+    // gemini-3.1-flash-lite uses MINIMAL; gemini-4-hydrogen supports LOW (never MINIMAL)
+    const thinkingLevel =
+      model === MODEL_FAST_LITE ? ThinkingLevel.MINIMAL : ThinkingLevel.LOW;
+
+    try {
+      const params = buildConfig(model, thinkingLevel);
+      return await aiCacheBuffer.scheduleLiveCall(() =>
+        ai.models.generateContent({
+          model,
+          ...params,
+        })
+      );
+    } catch (err) {
+      lastErr = err;
+      if (isQuotaOrRateLimitError(err)) {
+        markModelCooldown(model);
+        continue;
+      }
+      throw err;
+    }
+  }
+
+  throw lastErr ?? new Error('AI quota temporarily reached; using built-in free engine.');
+}
 
 export interface CandidateResumeInfo {
   candidateName: string;
@@ -23,41 +95,62 @@ export interface CandidateResumeInfo {
 export async function extractCandidateInfoFromText(
   extractedText: string
 ): Promise<CandidateResumeInfo> {
-  const response = await ai.models.generateContent({
-    model: MODEL,
-    contents: `Extract the candidate's contact header metadata from this resume text. Return the exact location/city/address substring as it literally appears on the resume (do not normalize or rewrite it). If a field is not found, return an empty string "".
+  const { value } = await aiCacheBuffer.getOrCompute<CandidateResumeInfo>({
+    namespace: 'resume_extract',
+    keyParts: [extractedText.slice(0, 12000)],
+    ttlMs: TTL_24H,
+    compute: async () => {
+      try {
+        const response = await generateWithFallback(
+          [MODEL_FAST_LITE, MODEL_PRIMARY_TEXT],
+          (_model, thinkingLevel) => ({
+            contents: `Extract the candidate's contact header metadata from this resume text. Return the exact location/city/address substring as it literally appears on the resume (do not normalize or rewrite it). If a field is not found, return an empty string "".
 
 RESUME TEXT:
 ${extractedText.slice(0, 12000)}`,
-    config: {
-      systemInstruction:
-        'You extract exact factual contact metadata from a candidate resume without inventing or altering any values.',
-      thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
-      responseMimeType: 'application/json',
-      responseSchema: {
-        type: Type.OBJECT,
-        properties: {
-          candidateName: { type: Type.STRING, description: 'Full name of the candidate.' },
-          candidateEmail: { type: Type.STRING, description: 'Email address on the resume.' },
-          candidatePhone: { type: Type.STRING, description: 'Phone number on the resume.' },
-          originalLocation: {
-            type: Type.STRING,
-            description:
-              'Exact literal city/state/location substring as printed in the resume header or contact section (e.g. "Bengaluru, Karnataka" or "San Francisco, CA"). Empty string if absent.',
-          },
-        },
-        required: ['candidateName', 'candidateEmail', 'candidatePhone', 'originalLocation'],
-      },
+            config: {
+              systemInstruction:
+                'You extract exact factual contact metadata from a candidate resume without inventing or altering any values.',
+              thinkingConfig: { thinkingLevel },
+              responseMimeType: 'application/json',
+              responseSchema: {
+                type: Type.OBJECT,
+                properties: {
+                  candidateName: { type: Type.STRING, description: 'Full name of the candidate.' },
+                  candidateEmail: { type: Type.STRING, description: 'Email address on the resume.' },
+                  candidatePhone: { type: Type.STRING, description: 'Phone number on the resume.' },
+                  originalLocation: {
+                    type: Type.STRING,
+                    description:
+                      'Exact literal city/state/location substring as printed in the resume header or contact section (e.g. "Bengaluru, Karnataka" or "San Francisco, CA"). Empty string if absent.',
+                  },
+                },
+                required: [
+                  'candidateName',
+                  'candidateEmail',
+                  'candidatePhone',
+                  'originalLocation',
+                ],
+              },
+            },
+          })
+        );
+
+        const parsed = JSON.parse((response.text ?? '{}').trim()) as Partial<CandidateResumeInfo>;
+        return {
+          candidateName: (parsed.candidateName ?? '').trim(),
+          candidateEmail: (parsed.candidateEmail ?? '').trim(),
+          candidatePhone: (parsed.candidatePhone ?? '').trim(),
+          originalLocation: (parsed.originalLocation ?? '').trim(),
+        };
+      } catch {
+        aiCacheBuffer.recordFallback();
+        return extractCandidateInfoFallback(extractedText);
+      }
     },
   });
 
-  const parsed = JSON.parse((response.text ?? '{}').trim()) as Partial<CandidateResumeInfo>;
-  return {
-    candidateName: (parsed.candidateName ?? '').trim(),
-    candidateEmail: (parsed.candidateEmail ?? '').trim(),
-    candidatePhone: (parsed.candidatePhone ?? '').trim(),
-    originalLocation: (parsed.originalLocation ?? '').trim(),
-  };
+  return value;
 }
 
 export interface TailoredLocationResult {
@@ -75,12 +168,26 @@ export async function prepareLocationAndJdAnalysis(params: {
   jobTitle: string;
   jobDescription: string;
 }): Promise<TailoredLocationResult> {
-  const normalizedTarget = normalizeJobLocationToCityState(params.jobLocation) || params.jobLocation.trim();
+  const normalizedTarget =
+    normalizeJobLocationToCityState(params.jobLocation) || params.jobLocation.trim();
   const enforcedReplacement = `Preferred Location: ${normalizedTarget}`;
 
-  const response = await ai.models.generateContent({
-    model: MODEL,
-    contents: `You have two strict tasks:
+  const { value } = await aiCacheBuffer.getOrCompute<TailoredLocationResult>({
+    namespace: 'resume_location_jd',
+    keyParts: [
+      params.originalLocation,
+      normalizedTarget,
+      params.companyName.trim().toLowerCase(),
+      params.jobTitle.trim().toLowerCase(),
+      params.jobDescription.slice(0, 4000),
+    ],
+    ttlMs: TTL_6H,
+    compute: async () => {
+      try {
+        const response = await generateWithFallback(
+          [MODEL_FAST_LITE, MODEL_PRIMARY_TEXT],
+          (_model, thinkingLevel) => ({
+            contents: `You have two strict tasks:
 1. Determine the exact literal location substring in the candidate's master resume to update with the clearly labelled target/preferred location "${enforcedReplacement}" WITHOUT falsely claiming it as the candidate's current residential address.
    - Candidate's stored original location string: ${JSON.stringify(params.originalLocation)}
    - Target normalized City, State: ${JSON.stringify(normalizedTarget)}
@@ -92,44 +199,70 @@ ${params.extractedText.slice(0, 6000)}
 
 JOB DESCRIPTION:
 ${params.jobDescription.slice(0, 12000)}`,
-    config: {
-      systemInstruction:
-        'Follow instructions strictly. Never alter employment history, skills, dates, titles, education, or contact details. Use City, State format only.',
-      thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
-      responseMimeType: 'application/json',
-      responseSchema: {
-        type: Type.OBJECT,
-        properties: {
-          exactOriginalSubstring: {
-            type: Type.STRING,
-            description: 'Exact literal location substring in the resume to replace, or empty string.',
-          },
-          replacementLocationText: {
-            type: Type.STRING,
-            description: 'Clearly labelled target/preferred job location text, e.g., "Preferred Location: Pune, Maharashtra".',
-          },
-          jdSummary: {
-            type: Type.STRING,
-            description: 'Concise 2-sentence summary of the role and what the company seeks.',
-          },
-          keyRequirements: {
-            type: Type.ARRAY,
-            items: { type: Type.STRING },
-            description: 'Up to 6 key requirements extracted from the job description.',
-          },
-        },
-        required: ['exactOriginalSubstring', 'replacementLocationText', 'jdSummary', 'keyRequirements'],
-      },
+            config: {
+              systemInstruction:
+                'Follow instructions strictly. Never alter employment history, skills, dates, titles, education, or contact details. Use City, State format only.',
+              thinkingConfig: { thinkingLevel },
+              responseMimeType: 'application/json',
+              responseSchema: {
+                type: Type.OBJECT,
+                properties: {
+                  exactOriginalSubstring: {
+                    type: Type.STRING,
+                    description:
+                      'Exact literal location substring in the resume to replace, or empty string.',
+                  },
+                  replacementLocationText: {
+                    type: Type.STRING,
+                    description:
+                      'Clearly labelled target/preferred job location text, e.g., "Preferred Location: Pune, Maharashtra".',
+                  },
+                  jdSummary: {
+                    type: Type.STRING,
+                    description: 'Concise 2-sentence summary of the role and what the company seeks.',
+                  },
+                  keyRequirements: {
+                    type: Type.ARRAY,
+                    items: { type: Type.STRING },
+                    description: 'Up to 6 key requirements extracted from the job description.',
+                  },
+                },
+                required: [
+                  'exactOriginalSubstring',
+                  'replacementLocationText',
+                  'jdSummary',
+                  'keyRequirements',
+                ],
+              },
+            },
+          })
+        );
+
+        const parsed = JSON.parse(
+          (response.text ?? '{}').trim()
+        ) as Partial<TailoredLocationResult>;
+        return {
+          exactOriginalSubstring: (parsed.exactOriginalSubstring ?? params.originalLocation).trim(),
+          replacementLocationText: enforcedReplacement,
+          jdSummary: (parsed.jdSummary ?? '').trim(),
+          keyRequirements: Array.isArray(parsed.keyRequirements)
+            ? parsed.keyRequirements.slice(0, 8)
+            : [],
+        };
+      } catch {
+        aiCacheBuffer.recordFallback();
+        return prepareLocationAndJdFallback({
+          originalLocation: params.originalLocation,
+          jobLocation: normalizedTarget,
+          companyName: params.companyName,
+          jobTitle: params.jobTitle,
+          jobDescription: params.jobDescription,
+        });
+      }
     },
   });
 
-  const parsed = JSON.parse((response.text ?? '{}').trim()) as Partial<TailoredLocationResult>;
-  return {
-    exactOriginalSubstring: (parsed.exactOriginalSubstring ?? params.originalLocation).trim(),
-    replacementLocationText: enforcedReplacement,
-    jdSummary: (parsed.jdSummary ?? '').trim(),
-    keyRequirements: Array.isArray(parsed.keyRequirements) ? parsed.keyRequirements.slice(0, 8) : [],
-  };
+  return value;
 }
 
 function getCanonicalSubject(
@@ -205,12 +338,14 @@ export async function generateJobApplicationEmail(params: {
   responsibilities?: string[];
   applicationInstructions?: string;
   emailType?: EmailPurposeType;
+  bypassCache?: boolean;
 }): Promise<{ subject: string; body: string }> {
   const candidateDisplay = params.candidateName || 'Candidate';
   const emailType: EmailPurposeType =
     params.emailType ||
     (params.recruiterName?.trim() ? 'initial_application' : 'application_unnamed_recruiter');
-  const normalizedLocation = normalizeJobLocationToCityState(params.jobLocation) || params.jobLocation;
+  const normalizedLocation =
+    normalizeJobLocationToCityState(params.jobLocation) || params.jobLocation;
   const targetSubject = getCanonicalSubject(
     emailType,
     params.jobTitle.trim(),
@@ -230,9 +365,27 @@ export async function generateJobApplicationEmail(params: {
     recruiterName: params.recruiterName,
   });
 
-  const response = await ai.models.generateContent({
-    model: MODEL,
-    contents: `Write a concise, convincing, professional business email using ONLY verified facts from the candidate's master resume and the job description below.
+  const { value } = await aiCacheBuffer.getOrCompute<{ subject: string; body: string }>({
+    namespace: 'email_generate',
+    keyParts: [
+      candidateDisplay,
+      params.companyName.trim().toLowerCase(),
+      params.jobTitle.trim().toLowerCase(),
+      normalizedLocation,
+      params.recruiterName?.trim() ?? '',
+      emailType,
+      params.jobDescription.slice(0, 4000),
+      params.extractedText.slice(0, 2000),
+    ],
+    ttlMs: TTL_2H,
+    bypassCache: params.bypassCache,
+    shouldCache: (res) => Boolean(res.body.trim()),
+    compute: async () => {
+      try {
+        const response = await generateWithFallback(
+          [MODEL_PRIMARY_TEXT, MODEL_FAST_LITE],
+          (_model, thinkingLevel) => ({
+            contents: `Write a concise, convincing, professional business email using ONLY verified facts from the candidate's master resume and the job description below.
 
 CANDIDATE DETAILS:
 Name: ${candidateDisplay}
@@ -265,42 +418,53 @@ MANDATORY RULES:
    - Sign-off: Professional closing with ${candidateDisplay}${params.candidateEmail ? `, ${params.candidateEmail}` : ''}${params.candidatePhone ? `, ${params.candidatePhone}` : ''}.
 3. STRICT GROUNDING: NEVER invent experience, metrics, employers, certifications, or skills not explicitly in the master resume.
 4. AVOID clichés ("I am writing to express my keen interest", "dynamic self-starter", "hit the ground running", "esteemed organization"). Sound natural, confident, and human.`,
-    config: {
-      systemInstruction:
-        'You are an executive business communications writer. Write tailored, concise, grounded job application emails strictly from verified resume facts without clichés or invented claims.',
-      thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
-      responseMimeType: 'application/json',
-      responseSchema: {
-        type: Type.OBJECT,
-        properties: {
-          subject: { type: Type.STRING },
-          body: { type: Type.STRING },
-        },
-        required: ['subject', 'body'],
-      },
+            config: {
+              systemInstruction:
+                'You are an executive business communications writer. Write tailored, concise, grounded job application emails strictly from verified resume facts without clichés or invented claims.',
+              thinkingConfig: { thinkingLevel },
+              responseMimeType: 'application/json',
+              responseSchema: {
+                type: Type.OBJECT,
+                properties: {
+                  subject: { type: Type.STRING },
+                  body: { type: Type.STRING },
+                },
+                required: ['subject', 'body'],
+              },
+            },
+          })
+        );
+
+        const parsed = JSON.parse((response.text ?? '{}').trim()) as {
+          subject?: string;
+          body?: string;
+        };
+        let subject = (parsed.subject ?? '').trim();
+
+        const lowerSubj = subject.toLowerCase();
+        const isGeneric =
+          !subject ||
+          lowerSubj === 'job application' ||
+          lowerSubj === 'resume attached' ||
+          lowerSubj === 'application' ||
+          !lowerSubj.includes(params.jobTitle.trim().toLowerCase());
+
+        if (isGeneric) {
+          subject = targetSubject;
+        }
+
+        return {
+          subject,
+          body: (parsed.body ?? '').trim(),
+        };
+      } catch {
+        aiCacheBuffer.recordFallback();
+        return generateApplicationEmailFallback(params);
+      }
     },
   });
 
-  const parsed = JSON.parse((response.text ?? '{}').trim()) as { subject?: string; body?: string };
-  let subject = (parsed.subject ?? '').trim();
-
-  // Safeguard: reject generic subjects or missing exact job title
-  const lowerSubj = subject.toLowerCase();
-  const isGeneric =
-    !subject ||
-    lowerSubj === 'job application' ||
-    lowerSubj === 'resume attached' ||
-    lowerSubj === 'application' ||
-    !lowerSubj.includes(params.jobTitle.trim().toLowerCase());
-
-  if (isGeneric) {
-    subject = targetSubject;
-  }
-
-  return {
-    subject,
-    body: (parsed.body ?? '').trim(),
-  };
+  return value;
 }
 
 export async function analyzeManualJobDescription(params: {
@@ -309,37 +473,63 @@ export async function analyzeManualJobDescription(params: {
   jobLocation: string;
   jobDescription: string;
 }): Promise<{ aiSummary: string; keyRequirements: string[] }> {
-  const response = await ai.models.generateContent({
-    model: MODEL,
-    contents: `Analyze this job posting for ${params.jobTitle} at ${params.companyName} (${params.jobLocation}). Provide a crisp 2-sentence summary and up to 6 key requirements.
+  const { value } = await aiCacheBuffer.getOrCompute<{
+    aiSummary: string;
+    keyRequirements: string[];
+  }>({
+    namespace: 'job_analyze_jd',
+    keyParts: [
+      params.companyName.trim().toLowerCase(),
+      params.jobTitle.trim().toLowerCase(),
+      params.jobLocation.trim().toLowerCase(),
+      params.jobDescription.slice(0, 6000),
+    ],
+    ttlMs: TTL_6H,
+    compute: async () => {
+      try {
+        const response = await generateWithFallback(
+          [MODEL_FAST_LITE, MODEL_PRIMARY_TEXT],
+          (_model, thinkingLevel) => ({
+            contents: `Analyze this job posting for ${params.jobTitle} at ${params.companyName} (${params.jobLocation}). Provide a crisp 2-sentence summary and up to 6 key requirements.
 
 JOB DESCRIPTION:
 ${params.jobDescription.slice(0, 12000)}`,
-    config: {
-      thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
-      responseMimeType: 'application/json',
-      responseSchema: {
-        type: Type.OBJECT,
-        properties: {
-          aiSummary: { type: Type.STRING },
-          keyRequirements: {
-            type: Type.ARRAY,
-            items: { type: Type.STRING },
-          },
-        },
-        required: ['aiSummary', 'keyRequirements'],
-      },
+            config: {
+              thinkingConfig: { thinkingLevel },
+              responseMimeType: 'application/json',
+              responseSchema: {
+                type: Type.OBJECT,
+                properties: {
+                  aiSummary: { type: Type.STRING },
+                  keyRequirements: {
+                    type: Type.ARRAY,
+                    items: { type: Type.STRING },
+                  },
+                },
+                required: ['aiSummary', 'keyRequirements'],
+              },
+            },
+          })
+        );
+
+        const parsed = JSON.parse((response.text ?? '{}').trim()) as {
+          aiSummary?: string;
+          keyRequirements?: string[];
+        };
+        return {
+          aiSummary: (parsed.aiSummary ?? '').trim(),
+          keyRequirements: Array.isArray(parsed.keyRequirements)
+            ? parsed.keyRequirements.slice(0, 8)
+            : [],
+        };
+      } catch {
+        aiCacheBuffer.recordFallback();
+        return analyzeManualJdFallback(params);
+      }
     },
   });
 
-  const parsed = JSON.parse((response.text ?? '{}').trim()) as {
-    aiSummary?: string;
-    keyRequirements?: string[];
-  };
-  return {
-    aiSummary: (parsed.aiSummary ?? '').trim(),
-    keyRequirements: Array.isArray(parsed.keyRequirements) ? parsed.keyRequirements.slice(0, 8) : [],
-  };
+  return value;
 }
 
 export interface ParsedJobInput {
@@ -365,9 +555,16 @@ export interface ParsedJobInput {
 }
 
 export async function parseRawJobInput(rawText: string): Promise<ParsedJobInput> {
-  const response = await ai.models.generateContent({
-    model: MODEL,
-    contents: `Extract structured job application details from the pasted job posting, recruitment email, LinkedIn/Naukri/Indeed ad, or careers page text below.
+  const { value } = await aiCacheBuffer.getOrCompute<ParsedJobInput>({
+    namespace: 'job_parse',
+    keyParts: [rawText.trim().slice(0, 18000)],
+    ttlMs: TTL_6H,
+    compute: async () => {
+      try {
+        const response = await generateWithFallback(
+          [MODEL_FAST_LITE, MODEL_PRIMARY_TEXT],
+          (_model, thinkingLevel) => ({
+            contents: `Extract structured job application details from the pasted job posting, recruitment email, LinkedIn/Naukri/Indeed ad, or careers page text below.
 
 PASTED CONTENT:
 ${rawText.slice(0, 18000)}
@@ -390,86 +587,101 @@ EXTRACTION RULES (STRICT):
    - preferredQualifications: Up to 6 preferred/nice-to-have qualifications.
    - applicationInstructions: Any specific instructions (e.g., subject line instructions, portfolio request, call timing); otherwise "".
    - extractedDescription: Clean, readable full job description text preserving all role details.
-   - applicationSource: Identify source if clear ("LinkedIn", "HR Email", "Naukri", "Indeed", "Company Careers Page", "Wellfound", "Glassdoor", "Referral", or "Job Posting").
+   - applicationSource: Identify source if clear ("LinkedIn", "HR Email", "Naukri", "Indeed", "WorkIndia", "Apna", "Company Careers Page", "Wellfound", "Glassdoor", "Referral", or "Job Posting").
    - aiSummary: Crisp 2-sentence summary of the opportunity.
    - keyRequirements: Up to 6 top requirements.`,
-    config: {
-      systemInstruction:
-        'You are a precision job-posting parser. Extract all available factual fields from any unstructured job advertisement or recruitment email without ever inventing missing emails, company names, or facts.',
-      thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
-      responseMimeType: 'application/json',
-      responseSchema: {
-        type: Type.OBJECT,
-        properties: {
-          companyName: { type: Type.STRING },
-          jobTitle: { type: Type.STRING },
-          extractedDescription: { type: Type.STRING },
-          responsibilities: { type: Type.ARRAY, items: { type: Type.STRING } },
-          requiredExperience: { type: Type.STRING },
-          requiredSkills: { type: Type.ARRAY, items: { type: Type.STRING } },
-          preferredQualifications: { type: Type.ARRAY, items: { type: Type.STRING } },
-          jobLocation: { type: Type.STRING },
-          companyAddress: { type: Type.STRING },
-          recruiterName: { type: Type.STRING },
-          hrEmail: { type: Type.STRING },
-          jobUrl: { type: Type.STRING },
-          salary: { type: Type.STRING },
-          employmentType: { type: Type.STRING },
-          applicationInstructions: { type: Type.STRING },
-          applicationSource: { type: Type.STRING },
-          notes: { type: Type.STRING },
-          aiSummary: { type: Type.STRING },
-          keyRequirements: { type: Type.ARRAY, items: { type: Type.STRING } },
-        },
-        required: [
-          'companyName',
-          'jobTitle',
-          'extractedDescription',
-          'responsibilities',
-          'requiredExperience',
-          'requiredSkills',
-          'preferredQualifications',
-          'jobLocation',
-          'companyAddress',
-          'recruiterName',
-          'hrEmail',
-          'jobUrl',
-          'salary',
-          'employmentType',
-          'applicationInstructions',
-          'applicationSource',
-          'notes',
-          'aiSummary',
-          'keyRequirements',
-        ],
-      },
+            config: {
+              systemInstruction:
+                'You are a precision job-posting parser. Extract all available factual fields from any unstructured job advertisement or recruitment email without ever inventing missing emails, company names, or facts.',
+              thinkingConfig: { thinkingLevel },
+              responseMimeType: 'application/json',
+              responseSchema: {
+                type: Type.OBJECT,
+                properties: {
+                  companyName: { type: Type.STRING },
+                  jobTitle: { type: Type.STRING },
+                  extractedDescription: { type: Type.STRING },
+                  responsibilities: { type: Type.ARRAY, items: { type: Type.STRING } },
+                  requiredExperience: { type: Type.STRING },
+                  requiredSkills: { type: Type.ARRAY, items: { type: Type.STRING } },
+                  preferredQualifications: { type: Type.ARRAY, items: { type: Type.STRING } },
+                  jobLocation: { type: Type.STRING },
+                  companyAddress: { type: Type.STRING },
+                  recruiterName: { type: Type.STRING },
+                  hrEmail: { type: Type.STRING },
+                  jobUrl: { type: Type.STRING },
+                  salary: { type: Type.STRING },
+                  employmentType: { type: Type.STRING },
+                  applicationInstructions: { type: Type.STRING },
+                  applicationSource: { type: Type.STRING },
+                  notes: { type: Type.STRING },
+                  aiSummary: { type: Type.STRING },
+                  keyRequirements: { type: Type.ARRAY, items: { type: Type.STRING } },
+                },
+                required: [
+                  'companyName',
+                  'jobTitle',
+                  'extractedDescription',
+                  'responsibilities',
+                  'requiredExperience',
+                  'requiredSkills',
+                  'preferredQualifications',
+                  'jobLocation',
+                  'companyAddress',
+                  'recruiterName',
+                  'hrEmail',
+                  'jobUrl',
+                  'salary',
+                  'employmentType',
+                  'applicationInstructions',
+                  'applicationSource',
+                  'notes',
+                  'aiSummary',
+                  'keyRequirements',
+                ],
+              },
+            },
+          })
+        );
+
+        const parsed = JSON.parse((response.text ?? '{}').trim()) as Partial<ParsedJobInput>;
+        return {
+          companyName: (parsed.companyName ?? '').trim(),
+          jobTitle: (parsed.jobTitle ?? '').trim(),
+          extractedDescription: (parsed.extractedDescription ?? '').trim() || rawText.trim(),
+          responsibilities: Array.isArray(parsed.responsibilities)
+            ? parsed.responsibilities.slice(0, 8)
+            : [],
+          requiredExperience: (parsed.requiredExperience ?? '').trim(),
+          requiredSkills: Array.isArray(parsed.requiredSkills)
+            ? parsed.requiredSkills.slice(0, 12)
+            : [],
+          preferredQualifications: Array.isArray(parsed.preferredQualifications)
+            ? parsed.preferredQualifications.slice(0, 6)
+            : [],
+          jobLocation: normalizeJobLocationToCityState((parsed.jobLocation ?? '').trim()),
+          companyAddress: (parsed.companyAddress ?? '').trim(),
+          recruiterName: (parsed.recruiterName ?? '').trim(),
+          hrEmail: (parsed.hrEmail ?? '').trim(),
+          jobUrl: (parsed.jobUrl ?? '').trim(),
+          salary: (parsed.salary ?? '').trim(),
+          employmentType: (parsed.employmentType ?? '').trim(),
+          applicationInstructions: (parsed.applicationInstructions ?? '').trim(),
+          applicationSource: (parsed.applicationSource ?? '').trim() || 'Job Posting',
+          notes: (parsed.notes ?? '').trim(),
+          aiSummary: (parsed.aiSummary ?? '').trim(),
+          keyRequirements: Array.isArray(parsed.keyRequirements)
+            ? parsed.keyRequirements.slice(0, 8)
+            : [],
+        };
+      } catch {
+        aiCacheBuffer.recordFallback();
+        return parseRawJobInputFallback(rawText);
+      }
     },
   });
 
-  const parsed = JSON.parse((response.text ?? '{}').trim()) as Partial<ParsedJobInput>;
-  return {
-    companyName: (parsed.companyName ?? '').trim(),
-    jobTitle: (parsed.jobTitle ?? '').trim(),
-    extractedDescription: (parsed.extractedDescription ?? '').trim() || rawText.trim(),
-    responsibilities: Array.isArray(parsed.responsibilities) ? parsed.responsibilities.slice(0, 8) : [],
-    requiredExperience: (parsed.requiredExperience ?? '').trim(),
-    requiredSkills: Array.isArray(parsed.requiredSkills) ? parsed.requiredSkills.slice(0, 12) : [],
-    preferredQualifications: Array.isArray(parsed.preferredQualifications)
-      ? parsed.preferredQualifications.slice(0, 6)
-      : [],
-    jobLocation: normalizeJobLocationToCityState((parsed.jobLocation ?? '').trim()),
-    companyAddress: (parsed.companyAddress ?? '').trim(),
-    recruiterName: (parsed.recruiterName ?? '').trim(),
-    hrEmail: (parsed.hrEmail ?? '').trim(),
-    jobUrl: (parsed.jobUrl ?? '').trim(),
-    salary: (parsed.salary ?? '').trim(),
-    employmentType: (parsed.employmentType ?? '').trim(),
-    applicationInstructions: (parsed.applicationInstructions ?? '').trim(),
-    applicationSource: (parsed.applicationSource ?? '').trim() || 'Job Posting',
-    notes: (parsed.notes ?? '').trim(),
-    aiSummary: (parsed.aiSummary ?? '').trim(),
-    keyRequirements: Array.isArray(parsed.keyRequirements) ? parsed.keyRequirements.slice(0, 8) : [],
-  };
+  return value;
 }
 
 export async function findCompanyHrContact(params: {
@@ -477,46 +689,100 @@ export async function findCompanyHrContact(params: {
   jobLocation?: string;
   jobUrl?: string;
 }): Promise<{ hrEmail: string; sourceTitle: string; sourceUrl: string; message: string }> {
-  const response = await ai.models.generateContent({
-    model: MODEL,
-    contents: `Search for the official careers or HR recruitment email address for "${params.companyName}"${params.jobLocation ? ` (${params.jobLocation})` : ''}${params.jobUrl ? ` related to ${params.jobUrl}` : ''}.
+  const normalizedCompany = params.companyName.trim().toLowerCase();
+  const normalizedLoc = (params.jobLocation ?? '').trim().toLowerCase();
+  const normalizedUrl = (params.jobUrl ?? '').trim().toLowerCase();
+
+  // Check negative/transient results separately via short TTL vs positive hits for 12h
+  const posKey = aiCacheBuffer.makeKey('hr_lookup_hit', [normalizedCompany, normalizedLoc, normalizedUrl]);
+  const cachedPositive = aiCacheBuffer.get<{
+    hrEmail: string;
+    sourceTitle: string;
+    sourceUrl: string;
+    message: string;
+  }>(posKey);
+  if (cachedPositive) {
+    aiCacheBuffer.recordHit();
+    return cachedPositive;
+  }
+
+  const { value } = await aiCacheBuffer.getOrCompute<{
+    hrEmail: string;
+    sourceTitle: string;
+    sourceUrl: string;
+    message: string;
+  }>({
+    namespace: 'hr_lookup',
+    keyParts: [normalizedCompany, normalizedLoc, normalizedUrl],
+    ttlMs: TTL_30M,
+    compute: async () => {
+      // 1. Unlimited zero-AI-quota direct website + public search lookup first
+      const freeResult = await findCompanyHrContactFreeWeb(params);
+      if (freeResult && freeResult.hrEmail) {
+        aiCacheBuffer.set(posKey, 'hr_lookup_hit', freeResult, TTL_12H);
+        return freeResult;
+      }
+
+      // 2. Optionally query Gemini Google Search Grounding (with cooldown + fallback)
+      try {
+        const response = await generateWithFallback(
+          [MODEL_FAST_LITE, MODEL_PRIMARY_TEXT],
+          (_model, thinkingLevel) => ({
+            contents: `Search for the official careers or HR recruitment email address for "${params.companyName}"${params.jobLocation ? ` (${params.jobLocation})` : ''}${params.jobUrl ? ` related to ${params.jobUrl}` : ''}.
 Return ONLY a verified official careers/HR/recruitment email address explicitly published on the company's official website or official careers/contact page.
 If no verified official recruitment email address is publicly published in the search results, explicitly state "NONE_FOUND" and do NOT guess or invent an email.`,
-    config: {
-      tools: [{ googleSearch: {} }],
-      thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
+            config: {
+              tools: [{ googleSearch: {} }],
+              thinkingConfig: { thinkingLevel },
+            },
+          })
+        );
+
+        const text = (response.text ?? '').trim();
+        const chunks = response.candidates?.[0]?.groundingMetadata?.groundingChunks ?? [];
+        const firstWeb = chunks.find((c) => c.web?.uri)?.web;
+
+        if (!text || text.includes('NONE_FOUND')) {
+          return {
+            hrEmail: '',
+            sourceTitle: firstWeb?.title || '',
+            sourceUrl: firstWeb?.uri || '',
+            message: 'No verified official recruitment email found in public web results.',
+          };
+        }
+
+        const emailMatch = text.match(/[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/);
+        if (!emailMatch) {
+          return {
+            hrEmail: '',
+            sourceTitle: firstWeb?.title || '',
+            sourceUrl: firstWeb?.uri || '',
+            message: 'No verified official recruitment email found in public web results.',
+          };
+        }
+
+        const hit = {
+          hrEmail: emailMatch[0],
+          sourceTitle: firstWeb?.title || 'Official web search result',
+          sourceUrl: firstWeb?.uri || '',
+          message: `Discovered ${emailMatch[0]} via public web search.`,
+        };
+        aiCacheBuffer.set(posKey, 'hr_lookup_hit', hit, TTL_12H);
+        return hit;
+      } catch {
+        aiCacheBuffer.recordFallback();
+        return {
+          hrEmail: '',
+          sourceTitle: 'Free direct web check',
+          sourceUrl: '',
+          message:
+            'No public HR email found on company career/contact pages (AI web search quota temporarily reached — you can still enter an HR email manually or record as a Job Portal application).',
+        };
+      }
     },
   });
 
-  const text = (response.text ?? '').trim();
-  const chunks = response.candidates?.[0]?.groundingMetadata?.groundingChunks ?? [];
-  const firstWeb = chunks.find((c) => c.web?.uri)?.web;
-
-  if (!text || text.includes('NONE_FOUND')) {
-    return {
-      hrEmail: '',
-      sourceTitle: firstWeb?.title || '',
-      sourceUrl: firstWeb?.uri || '',
-      message: 'No verified official recruitment email found in public web results.',
-    };
-  }
-
-  const emailMatch = text.match(/[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/);
-  if (!emailMatch) {
-    return {
-      hrEmail: '',
-      sourceTitle: firstWeb?.title || '',
-      sourceUrl: firstWeb?.uri || '',
-      message: 'No verified official recruitment email found in public web results.',
-    };
-  }
-
-  return {
-    hrEmail: emailMatch[0],
-    sourceTitle: firstWeb?.title || 'Official web search result',
-    sourceUrl: firstWeb?.uri || '',
-    message: `Discovered ${emailMatch[0]} via public web search.`,
-  };
+  return value;
 }
 
 export async function generateFollowUpEmail(params: {
@@ -527,12 +793,30 @@ export async function generateFollowUpEmail(params: {
   originalEmailSubject?: string;
   originalEmailBody?: string;
   previousFollowUps?: string[];
+  bypassCache?: boolean;
 }): Promise<{ subject: string; body: string }> {
   const candidateDisplay = params.candidateName || 'Candidate';
   const expectedSubject = `Follow-up on ${params.jobTitle} Application – ${params.companyName}`;
-  const response = await ai.models.generateContent({
-    model: MODEL,
-    contents: `Write a polite, concise, professional follow-up email for a job application.
+
+  const { value } = await aiCacheBuffer.getOrCompute<{ subject: string; body: string }>({
+    namespace: 'email_followup',
+    keyParts: [
+      candidateDisplay,
+      params.companyName.trim().toLowerCase(),
+      params.jobTitle.trim().toLowerCase(),
+      params.dateApplied,
+      params.originalEmailSubject ?? '',
+      (params.previousFollowUps ?? []).length,
+    ],
+    ttlMs: TTL_2H,
+    bypassCache: params.bypassCache,
+    shouldCache: (res) => Boolean(res.body.trim()),
+    compute: async () => {
+      try {
+        const response = await generateWithFallback(
+          [MODEL_PRIMARY_TEXT, MODEL_FAST_LITE],
+          (_model, thinkingLevel) => ({
+            contents: `Write a polite, concise, professional follow-up email for a job application.
 
 Candidate Name: ${candidateDisplay}
 Company: ${params.companyName}
@@ -548,29 +832,46 @@ RULES:
 3. Reference the specific role (${params.jobTitle}) at ${params.companyName} and application date (${params.dateApplied}).
 4. Reiterate enthusiasm and readiness to share any additional details or schedule a conversation.
 5. Never fabricate facts or use clichés.`,
-    config: {
-      thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
-      responseMimeType: 'application/json',
-      responseSchema: {
-        type: Type.OBJECT,
-        properties: {
-          subject: { type: Type.STRING },
-          body: { type: Type.STRING },
-        },
-        required: ['subject', 'body'],
-      },
+            config: {
+              thinkingConfig: { thinkingLevel },
+              responseMimeType: 'application/json',
+              responseSchema: {
+                type: Type.OBJECT,
+                properties: {
+                  subject: { type: Type.STRING },
+                  body: { type: Type.STRING },
+                },
+                required: ['subject', 'body'],
+              },
+            },
+          })
+        );
+
+        const parsed = JSON.parse((response.text ?? '{}').trim()) as {
+          subject?: string;
+          body?: string;
+        };
+        let subject = (parsed.subject ?? '').trim();
+        if (!subject || !subject.toLowerCase().includes(params.jobTitle.trim().toLowerCase())) {
+          subject = expectedSubject;
+        }
+        return {
+          subject,
+          body: (parsed.body ?? '').trim(),
+        };
+      } catch {
+        aiCacheBuffer.recordFallback();
+        return generateFollowUpEmailFallback({
+          candidateName: candidateDisplay,
+          companyName: params.companyName,
+          jobTitle: params.jobTitle,
+          dateApplied: params.dateApplied,
+        });
+      }
     },
   });
 
-  const parsed = JSON.parse((response.text ?? '{}').trim()) as { subject?: string; body?: string };
-  let subject = (parsed.subject ?? '').trim();
-  if (!subject || !subject.toLowerCase().includes(params.jobTitle.trim().toLowerCase())) {
-    subject = expectedSubject;
-  }
-  return {
-    subject,
-    body: (parsed.body ?? '').trim(),
-  };
+  return value;
 }
 
 export type ReplyClassificationType =
@@ -606,15 +907,39 @@ export async function classifyIncomingEmailReplies(params: {
 }): Promise<ClassifiedReplyItem[]> {
   if (params.messages.length === 0) return [];
 
-  const response = await ai.models.generateContent({
-    model: MODEL,
-    contents: `Match and classify incoming emails against the candidate's tracked job applications.
+  const appDigest = params.applications
+    .slice(0, 60)
+    .map((a) => a.id)
+    .join(',');
+
+  const cachedItems: ClassifiedReplyItem[] = [];
+  const uncachedMessages: typeof params.messages = [];
+
+  for (const m of params.messages.slice(0, 25)) {
+    const mKey = aiCacheBuffer.makeKey('gmail_classify_msg', [m.gmailMessageId, appDigest]);
+    const hit = aiCacheBuffer.get<ClassifiedReplyItem>(mKey);
+    if (hit) {
+      aiCacheBuffer.recordHit();
+      cachedItems.push(hit);
+    } else {
+      uncachedMessages.push(m);
+    }
+  }
+
+  if (uncachedMessages.length === 0) return cachedItems;
+
+  let freshResults: ClassifiedReplyItem[];
+  try {
+    const response = await generateWithFallback(
+      [MODEL_FAST_LITE, MODEL_PRIMARY_TEXT],
+      (_model, thinkingLevel) => ({
+        contents: `Match and classify incoming emails against the candidate's tracked job applications.
 
 TRACKED APPLICATIONS:
 ${JSON.stringify(params.applications.slice(0, 60), null, 2)}
 
 INCOMING MESSAGES:
-${JSON.stringify(params.messages.slice(0, 25), null, 2)}
+${JSON.stringify(uncachedMessages, null, 2)}
 
 RULES:
 1. If a message shares the exact gmailThreadId with an application, or clearly comes from the company's domain/HR email and references the company/job title, match it with matchConfidence = "high".
@@ -625,42 +950,59 @@ RULES:
    - "Rejection"
    - "Acknowledgement"
    - "Other"`,
-    config: {
-      thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
-      responseMimeType: 'application/json',
-      responseSchema: {
-        type: Type.ARRAY,
-        items: {
-          type: Type.OBJECT,
-          properties: {
-            gmailMessageId: { type: Type.STRING },
-            matchedApplicationId: { type: Type.STRING },
-            matchConfidence: { type: Type.STRING },
-            classification: { type: Type.STRING },
+        config: {
+          thinkingConfig: { thinkingLevel },
+          responseMimeType: 'application/json',
+          responseSchema: {
+            type: Type.ARRAY,
+            items: {
+              type: Type.OBJECT,
+              properties: {
+                gmailMessageId: { type: Type.STRING },
+                matchedApplicationId: { type: Type.STRING },
+                matchConfidence: { type: Type.STRING },
+                classification: { type: Type.STRING },
+              },
+              required: ['gmailMessageId', 'matchedApplicationId', 'matchConfidence', 'classification'],
+            },
           },
-          required: ['gmailMessageId', 'matchedApplicationId', 'matchConfidence', 'classification'],
         },
-      },
-    },
-  });
+      })
+    );
 
-  const parsed = JSON.parse((response.text ?? '[]').trim()) as Array<Partial<ClassifiedReplyItem>>;
-  const validClasses = new Set<ReplyClassificationType>([
-    'Interview Invitation',
-    'Further Information Requested',
-    'Rejection',
-    'Acknowledgement',
-    'Other',
-  ]);
+    const parsed = JSON.parse((response.text ?? '[]').trim()) as Array<Partial<ClassifiedReplyItem>>;
+    const validClasses = new Set<ReplyClassificationType>([
+      'Interview Invitation',
+      'Further Information Requested',
+      'Rejection',
+      'Acknowledgement',
+      'Other',
+    ]);
 
-  return parsed.map((item) => ({
-    gmailMessageId: String(item.gmailMessageId ?? ''),
-    matchedApplicationId: String(item.matchedApplicationId ?? ''),
-    matchConfidence: item.matchConfidence === 'high' ? 'high' : 'needs_review',
-    classification: validClasses.has(item.classification as ReplyClassificationType)
-      ? (item.classification as ReplyClassificationType)
-      : 'Other',
-  }));
+    freshResults = parsed.map((item) => ({
+      gmailMessageId: String(item.gmailMessageId ?? ''),
+      matchedApplicationId: String(item.matchedApplicationId ?? ''),
+      matchConfidence: item.matchConfidence === 'high' ? 'high' : 'needs_review',
+      classification: validClasses.has(item.classification as ReplyClassificationType)
+        ? (item.classification as ReplyClassificationType)
+        : 'Other',
+    }));
+  } catch {
+    aiCacheBuffer.recordFallback();
+    freshResults = classifyRepliesFallback({
+      messages: uncachedMessages,
+      applications: params.applications,
+    });
+  }
+
+  for (const item of freshResults) {
+    if (item.gmailMessageId) {
+      const mKey = aiCacheBuffer.makeKey('gmail_classify_msg', [item.gmailMessageId, appDigest]);
+      aiCacheBuffer.set(mKey, 'gmail_classify_msg', item, TTL_24H);
+    }
+  }
+
+  return [...cachedItems, ...freshResults];
 }
 
 export interface DetectedPortalConfirmationItem {
@@ -691,7 +1033,43 @@ export async function detectPortalApplicationConfirmations(params: {
 }): Promise<DetectedPortalConfirmationItem[]> {
   if (params.messages.length === 0) return [];
 
-  const compactMessages = params.messages.slice(0, 20).map((m) => ({
+  const cachedOrSkipped: DetectedPortalConfirmationItem[] = [];
+  const candidateMessages: typeof params.messages = [];
+
+  for (const m of params.messages.slice(0, 20)) {
+    const mKey = aiCacheBuffer.makeKey('gmail_confirm_msg', [m.gmailMessageId]);
+    const cached = aiCacheBuffer.get<DetectedPortalConfirmationItem>(mKey);
+    if (cached) {
+      aiCacheBuffer.recordHit();
+      cachedOrSkipped.push(cached);
+      continue;
+    }
+
+    if (isLikelyNonApplicationDigest(m.subject, m.snippet)) {
+      const skippedItem: DetectedPortalConfirmationItem = {
+        gmailMessageId: m.gmailMessageId,
+        isConfirmedApplication: false,
+        confidence: 'not_application',
+        companyName: '',
+        jobTitle: '',
+        jobLocation: '',
+        jobUrl: '',
+        applicationSource: 'Company Career Page',
+        applicationDate: m.receivedAt.slice(0, 10),
+        confirmationMessage: '',
+        recruiterName: '',
+        recruiterEmail: '',
+      };
+      aiCacheBuffer.set(mKey, 'gmail_confirm_msg', skippedItem, TTL_24H);
+      cachedOrSkipped.push(skippedItem);
+    } else {
+      candidateMessages.push(m);
+    }
+  }
+
+  if (candidateMessages.length === 0) return cachedOrSkipped;
+
+  const compactMessages = candidateMessages.map((m) => ({
     gmailMessageId: m.gmailMessageId,
     fromEmail: m.fromEmail,
     fromName: m.fromName,
@@ -700,9 +1078,12 @@ export async function detectPortalApplicationConfirmations(params: {
     content: (m.bodyExcerpt || m.snippet || '').slice(0, 2200),
   }));
 
-  const response = await ai.models.generateContent({
-    model: MODEL,
-    contents: `Analyze these emails from a job seeker's inbox and identify ONLY genuine job application submission confirmations.
+  let freshResults: DetectedPortalConfirmationItem[];
+  try {
+    const response = await generateWithFallback(
+      [MODEL_FAST_LITE, MODEL_PRIMARY_TEXT],
+      (_model, thinkingLevel) => ({
+        contents: `Analyze these emails from a job seeker's inbox and identify ONLY genuine job application submission confirmations.
 
 EMAILS TO ANALYZE:
 ${JSON.stringify(compactMessages, null, 2)}
@@ -726,78 +1107,92 @@ STRICT DETECTION RULES:
    - confidence:
      - "high" if isConfirmedApplication = true AND both companyName and jobTitle are clearly present.
      - "incomplete" if isConfirmedApplication = true BUT companyName or jobTitle is missing/unclear.`,
-    config: {
-      systemInstruction:
-        'You accurately distinguish confirmed job application submission receipts from job recommendations, vacancy alerts, and invitations. Never fabricate company names, titles, or emails.',
-      thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
-      responseMimeType: 'application/json',
-      responseSchema: {
-        type: Type.ARRAY,
-        items: {
-          type: Type.OBJECT,
-          properties: {
-            gmailMessageId: { type: Type.STRING },
-            isConfirmedApplication: { type: Type.BOOLEAN },
-            confidence: { type: Type.STRING },
-            companyName: { type: Type.STRING },
-            jobTitle: { type: Type.STRING },
-            jobLocation: { type: Type.STRING },
-            jobUrl: { type: Type.STRING },
-            applicationSource: { type: Type.STRING },
-            applicationDate: { type: Type.STRING },
-            confirmationMessage: { type: Type.STRING },
-            recruiterName: { type: Type.STRING },
-            recruiterEmail: { type: Type.STRING },
+        config: {
+          systemInstruction:
+            'You accurately distinguish confirmed job application submission receipts from job recommendations, vacancy alerts, and invitations. Never fabricate company names, titles, or emails.',
+          thinkingConfig: { thinkingLevel },
+          responseMimeType: 'application/json',
+          responseSchema: {
+            type: Type.ARRAY,
+            items: {
+              type: Type.OBJECT,
+              properties: {
+                gmailMessageId: { type: Type.STRING },
+                isConfirmedApplication: { type: Type.BOOLEAN },
+                confidence: { type: Type.STRING },
+                companyName: { type: Type.STRING },
+                jobTitle: { type: Type.STRING },
+                jobLocation: { type: Type.STRING },
+                jobUrl: { type: Type.STRING },
+                applicationSource: { type: Type.STRING },
+                applicationDate: { type: Type.STRING },
+                confirmationMessage: { type: Type.STRING },
+                recruiterName: { type: Type.STRING },
+                recruiterEmail: { type: Type.STRING },
+              },
+              required: [
+                'gmailMessageId',
+                'isConfirmedApplication',
+                'confidence',
+                'companyName',
+                'jobTitle',
+                'jobLocation',
+                'jobUrl',
+                'applicationSource',
+                'applicationDate',
+                'confirmationMessage',
+                'recruiterName',
+                'recruiterEmail',
+              ],
+            },
           },
-          required: [
-            'gmailMessageId',
-            'isConfirmedApplication',
-            'confidence',
-            'companyName',
-            'jobTitle',
-            'jobLocation',
-            'jobUrl',
-            'applicationSource',
-            'applicationDate',
-            'confirmationMessage',
-            'recruiterName',
-            'recruiterEmail',
-          ],
         },
-      },
-    },
-  });
+      })
+    );
 
-  const parsed = JSON.parse((response.text ?? '[]').trim()) as Array<
-    Partial<DetectedPortalConfirmationItem>
-  >;
+    const parsed = JSON.parse((response.text ?? '[]').trim()) as Array<
+      Partial<DetectedPortalConfirmationItem>
+    >;
 
-  return parsed.map((item) => {
-    const confirmed = Boolean(item.isConfirmedApplication);
-    const companyName = String(item.companyName ?? '').trim();
-    const jobTitle = String(item.jobTitle ?? '').trim();
-    let confidence: DetectedPortalConfirmationItem['confidence'] = 'not_application';
-    if (confirmed) {
-      confidence =
-        item.confidence === 'high' && companyName && jobTitle ? 'high' : 'incomplete';
+    freshResults = parsed.map((item) => {
+      const confirmed = Boolean(item.isConfirmedApplication);
+      const companyName = String(item.companyName ?? '').trim();
+      const jobTitle = String(item.jobTitle ?? '').trim();
+      let confidence: DetectedPortalConfirmationItem['confidence'] = 'not_application';
+      if (confirmed) {
+        confidence =
+          item.confidence === 'high' && companyName && jobTitle ? 'high' : 'incomplete';
+      }
+
+      const rawLoc = String(item.jobLocation ?? '').trim();
+      const normalizedLoc = rawLoc ? normalizeJobLocationToCityState(rawLoc) : '';
+
+      return {
+        gmailMessageId: String(item.gmailMessageId ?? '').trim(),
+        isConfirmedApplication: confirmed,
+        confidence,
+        companyName,
+        jobTitle,
+        jobLocation: normalizedLoc,
+        jobUrl: String(item.jobUrl ?? '').trim(),
+        applicationSource: String(item.applicationSource ?? '').trim() || 'Company Career Page',
+        applicationDate: String(item.applicationDate ?? '').trim().slice(0, 10),
+        confirmationMessage: String(item.confirmationMessage ?? '').trim().slice(0, 300),
+        recruiterName: String(item.recruiterName ?? '').trim(),
+        recruiterEmail: String(item.recruiterEmail ?? '').trim(),
+      };
+    });
+  } catch {
+    aiCacheBuffer.recordFallback();
+    freshResults = detectPortalConfirmationsFallback({ messages: candidateMessages });
+  }
+
+  for (const item of freshResults) {
+    if (item.gmailMessageId) {
+      const mKey = aiCacheBuffer.makeKey('gmail_confirm_msg', [item.gmailMessageId]);
+      aiCacheBuffer.set(mKey, 'gmail_confirm_msg', item, TTL_24H);
     }
+  }
 
-    const rawLoc = String(item.jobLocation ?? '').trim();
-    const normalizedLoc = rawLoc ? normalizeJobLocationToCityState(rawLoc) : '';
-
-    return {
-      gmailMessageId: String(item.gmailMessageId ?? '').trim(),
-      isConfirmedApplication: confirmed,
-      confidence,
-      companyName,
-      jobTitle,
-      jobLocation: normalizedLoc,
-      jobUrl: String(item.jobUrl ?? '').trim(),
-      applicationSource: String(item.applicationSource ?? '').trim() || 'Company Career Page',
-      applicationDate: String(item.applicationDate ?? '').trim().slice(0, 10),
-      confirmationMessage: String(item.confirmationMessage ?? '').trim().slice(0, 300),
-      recruiterName: String(item.recruiterName ?? '').trim(),
-      recruiterEmail: String(item.recruiterEmail ?? '').trim(),
-    };
-  });
+  return [...cachedOrSkipped, ...freshResults];
 }

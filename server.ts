@@ -10,6 +10,7 @@ import {
   createTailoredResumePdf,
   normalizeJobLocationToCityState,
   validateGeneratedTailoredPdf,
+  buildManualResumePdf,
 } from './src/server/pdfService.ts';
 import type { EmailPurposeType } from './src/types.ts';
 import {
@@ -23,6 +24,7 @@ import {
   classifyIncomingEmailReplies,
   detectPortalApplicationConfirmations,
 } from './src/server/gemini.ts';
+import { aiCacheBuffer } from './src/server/aiCacheBuffer.ts';
 import {
   sendGmailMessage,
   fetchRecentGmailReplies,
@@ -117,6 +119,62 @@ async function startServer() {
     } catch (error: unknown) {
       console.error('Resume parse error:', error);
       const message = error instanceof Error ? error.message : 'Failed to parse PDF resume.';
+      res.status(500).json({ error: message });
+    }
+  });
+
+  // 1b. Build a clean master resume PDF from manually edited text and contact metadata
+  app.post('/api/resume/build-pdf', requireAuth, async (req: AuthRequest, res) => {
+    try {
+      const {
+        candidateName,
+        candidateEmail,
+        candidatePhone,
+        originalLocation,
+        resumeText,
+        fileName,
+      } = req.body as {
+        candidateName?: string;
+        candidateEmail?: string;
+        candidatePhone?: string;
+        originalLocation?: string;
+        resumeText?: string;
+        fileName?: string;
+      };
+
+      if (!resumeText || !resumeText.trim() || resumeText.trim().length < 20) {
+        res.status(400).json({
+          error: 'Please enter at least 20 characters of resume content before generating a PDF.',
+        });
+        return;
+      }
+
+      const built = await buildManualResumePdf({
+        candidateName: (candidateName || req.user?.name || 'Candidate').trim(),
+        candidateEmail: (candidateEmail || req.user?.email || '').trim(),
+        candidatePhone: (candidatePhone || '').trim(),
+        originalLocation: (originalLocation || '').trim(),
+        resumeText: resumeText.trim(),
+      });
+
+      const baseName = (fileName || `${candidateName || 'Resume'}_Master.pdf`).trim();
+      const safeFileName = baseName.toLowerCase().endsWith('.pdf') ? baseName : `${baseName}.pdf`;
+
+      res.json({
+        pdfBase64: built.pdfBuffer.toString('base64'),
+        fileName: safeFileName,
+        fileSize: built.pdfBuffer.length,
+        extractedText: built.extractedText,
+        candidateName: (candidateName || req.user?.name || 'Candidate').trim(),
+        candidateEmail: (candidateEmail || req.user?.email || '').trim(),
+        candidatePhone: (candidatePhone || '').trim(),
+        originalLocation: (originalLocation || '').trim(),
+        locationBox: built.locationBox,
+      });
+    } catch (error: unknown) {
+      console.error('Build manual resume PDF error:', error);
+      const message =
+        error instanceof Error ? error.message : 'Failed to build resume PDF.';
       res.status(500).json({ error: message });
     }
   });
@@ -264,6 +322,7 @@ async function startServer() {
         responsibilities,
         applicationInstructions,
         emailType,
+        bypassCache,
       } = req.body as {
         extractedText?: string;
         candidateName?: string;
@@ -279,6 +338,7 @@ async function startServer() {
         responsibilities?: string[];
         applicationInstructions?: string;
         emailType?: EmailPurposeType;
+        bypassCache?: boolean;
       };
 
       if (!extractedText || !companyName || !jobTitle || !jobDescription) {
@@ -303,6 +363,7 @@ async function startServer() {
         responsibilities,
         applicationInstructions,
         emailType,
+        bypassCache: Boolean(bypassCache),
       });
 
       res.json(email);
@@ -402,6 +463,7 @@ async function startServer() {
         originalEmailSubject,
         originalEmailBody,
         previousFollowUps,
+        bypassCache,
       } = req.body as {
         candidateName?: string;
         companyName?: string;
@@ -410,6 +472,7 @@ async function startServer() {
         originalEmailSubject?: string;
         originalEmailBody?: string;
         previousFollowUps?: string[];
+        bypassCache?: boolean;
       };
 
       if (!companyName || !jobTitle || !dateApplied) {
@@ -427,6 +490,7 @@ async function startServer() {
         originalEmailSubject,
         originalEmailBody,
         previousFollowUps,
+        bypassCache: Boolean(bypassCache),
       });
 
       res.json(followUp);
@@ -435,6 +499,11 @@ async function startServer() {
       const message = error instanceof Error ? error.message : 'Failed to generate follow-up email.';
       res.status(500).json({ error: message });
     }
+  });
+
+  // 5b. AI response cache & buffer telemetry
+  app.get('/api/ai/cache-stats', requireAuth, (_req: AuthRequest, res) => {
+    res.json(aiCacheBuffer.getStats());
   });
 
   // 6. Send Email via connected Gmail account (with optional PDF attachment)

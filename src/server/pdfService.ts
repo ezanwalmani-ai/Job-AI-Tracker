@@ -887,3 +887,252 @@ export async function validateGeneratedTailoredPdf(
     placementMode,
   };
 }
+
+function sanitizePdfText(raw: string): string {
+  return raw
+    .replace(/[\u2018\u2019]/g, "'")
+    .replace(/[\u201C\u201D]/g, '"')
+    .replace(/[\u2013\u2014]/g, '-')
+    .replace(/\u2022/g, '*')
+    .replace(/\t/g, '  ')
+    // Strip characters outside printable Latin-1 range so WinAnsi never throws
+    .replace(/[^\x20-\x7E\xA0-\xFF]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function wrapLineToWidth(
+  text: string,
+  font: Awaited<ReturnType<PDFDocument['embedFont']>>,
+  fontSize: number,
+  maxWidth: number
+): string[] {
+  const clean = sanitizePdfText(text);
+  if (!clean) return [];
+  const words = clean.split(' ');
+  const lines: string[] = [];
+  let cur = '';
+  for (const w of words) {
+    const candidate = cur ? `${cur} ${w}` : w;
+    if (font.widthOfTextAtSize(candidate, fontSize) <= maxWidth) {
+      cur = candidate;
+    } else {
+      if (cur) lines.push(cur);
+      cur = w;
+    }
+  }
+  if (cur) lines.push(cur);
+  return lines;
+}
+
+export async function buildManualResumePdf(params: {
+  candidateName: string;
+  candidateEmail: string;
+  candidatePhone: string;
+  originalLocation: string;
+  resumeText: string;
+}): Promise<{
+  pdfBuffer: Buffer;
+  extractedText: string;
+  locationBox: PdfLocationBox;
+}> {
+  const pdfDoc = await PDFDocument.create();
+  const fontRegular = await pdfDoc.embedFont(StandardFonts.Helvetica);
+  const fontBold = await pdfDoc.embedFont(StandardFonts.HelveticaBold);
+
+  const pageWidth = 595.28; // A4
+  const pageHeight = 841.89;
+  const marginX = 48;
+  const topMargin = 52;
+  const bottomMargin = 48;
+  const contentWidth = pageWidth - marginX * 2;
+
+  let page = pdfDoc.addPage([pageWidth, pageHeight]);
+  let y = pageHeight - topMargin;
+
+  const ensureSpace = (needed: number) => {
+    if (y - needed < bottomMargin) {
+      page = pdfDoc.addPage([pageWidth, pageHeight]);
+      y = pageHeight - topMargin;
+    }
+  };
+
+  const nameText = sanitizePdfText(params.candidateName || 'Candidate');
+  const emailText = sanitizePdfText(params.candidateEmail || '');
+  const phoneText = sanitizePdfText(params.candidatePhone || '');
+  const locText = sanitizePdfText(params.originalLocation || '');
+
+  // Header: Candidate Name
+  page.drawText(nameText, {
+    x: marginX,
+    y,
+    size: 18,
+    font: fontBold,
+    color: rgb(0.06, 0.09, 0.16),
+  });
+  y -= 22;
+
+  // Header: Contact Details line (Phone | Email)
+  const contactParts = [phoneText, emailText].filter(Boolean);
+  if (contactParts.length > 0) {
+    const contactLine = contactParts.join('  |  ');
+    const wrappedContact = wrapLineToWidth(contactLine, fontRegular, 10, contentWidth);
+    for (const cLine of wrappedContact) {
+      page.drawText(cLine, {
+        x: marginX,
+        y,
+        size: 10,
+        font: fontRegular,
+        color: rgb(0.2, 0.25, 0.33),
+      });
+      y -= 14;
+    }
+  }
+
+  // Dedicated Location Line on Page 1 with measured locationBox for future tailoring
+  let locationBox: PdfLocationBox = {
+    hasLocationBox: false,
+    locPage: 0,
+    locX: 0,
+    locY: 0,
+    locW: 0,
+    locH: 0,
+    locFontSize: 10,
+  };
+
+  if (locText) {
+    const locFontSize = 10;
+    const locWidth = Math.max(80, fontRegular.widthOfTextAtSize(locText, locFontSize));
+    page.drawText(locText, {
+      x: marginX,
+      y,
+      size: locFontSize,
+      font: fontRegular,
+      color: rgb(0.2, 0.25, 0.33),
+    });
+    locationBox = {
+      hasLocationBox: true,
+      locPage: 0,
+      locX: marginX,
+      locY: Number(y.toFixed(2)),
+      locW: Number(locWidth.toFixed(2)),
+      locH: 12,
+      locFontSize,
+    };
+    y -= 15;
+  }
+
+  // Divider line
+  y -= 4;
+  page.drawRectangle({
+    x: marginX,
+    y,
+    width: contentWidth,
+    height: 1,
+    color: rgb(0.11, 0.31, 0.85),
+  });
+  y -= 16;
+
+  // Body lines: avoid duplicating contact header lines if pasted at very top of resumeText
+  const rawLines = params.resumeText.split(/\r?\n/);
+  const normStrip = (s: string) => s.toLowerCase().replace(/[^a-z0-9]/g, '');
+  const headerNorms = [nameText, emailText, phoneText, locText]
+    .map(normStrip)
+    .filter((s) => s.length >= 4);
+
+  let startIdx = 0;
+  while (startIdx < Math.min(rawLines.length, 6)) {
+    const lineTrim = rawLines[startIdx].trim();
+    if (!lineTrim) {
+      startIdx++;
+      continue;
+    }
+    const lineNorm = normStrip(lineTrim);
+    const matchesHeader =
+      lineNorm.length > 0 &&
+      headerNorms.some((h) => lineNorm === h || (lineNorm.includes(h) && lineNorm.length <= h.length + 25));
+    if (matchesHeader) {
+      startIdx++;
+    } else {
+      break;
+    }
+  }
+
+  const SECTION_HEADING_RE =
+    /^(summary|professional summary|profile|objective|experience|work experience|employment history|skills|core competencies|key skills|technical skills|education|certifications|projects|achievements|awards|languages)$/i;
+
+  for (let i = startIdx; i < rawLines.length; i++) {
+    const trimmed = rawLines[i].trim();
+    if (!trimmed) {
+      y -= 6;
+      continue;
+    }
+
+    const cleanCheck = sanitizePdfText(trimmed).replace(/:$/, '');
+    const isAllCapsHeading =
+      cleanCheck.length >= 3 &&
+      cleanCheck.length <= 48 &&
+      cleanCheck === cleanCheck.toUpperCase() &&
+      /[A-Z]/.test(cleanCheck);
+    const isHeading = isAllCapsHeading || SECTION_HEADING_RE.test(cleanCheck);
+
+    if (isHeading) {
+      ensureSpace(24);
+      y -= 5;
+      page.drawText(cleanCheck.toUpperCase(), {
+        x: marginX,
+        y,
+        size: 11,
+        font: fontBold,
+        color: rgb(0.06, 0.16, 0.38),
+      });
+      y -= 4;
+      page.drawRectangle({
+        x: marginX,
+        y,
+        width: contentWidth,
+        height: 0.5,
+        color: rgb(0.82, 0.85, 0.9),
+      });
+      y -= 13;
+      continue;
+    }
+
+    const isBullet = /^[-*•▪]\s+/.test(trimmed);
+    const lineBody = isBullet ? trimmed.replace(/^[-*•▪]\s+/, '') : trimmed;
+    const textIndent = isBullet ? 12 : 0;
+    const wrapped = wrapLineToWidth(lineBody, fontRegular, 10, contentWidth - textIndent);
+
+    for (let li = 0; li < wrapped.length; li++) {
+      ensureSpace(14.5);
+      if (isBullet && li === 0) {
+        page.drawText('*', {
+          x: marginX + 2,
+          y,
+          size: 10,
+          font: fontBold,
+          color: rgb(0.2, 0.25, 0.33),
+        });
+      }
+      page.drawText(wrapped[li], {
+        x: marginX + textIndent,
+        y,
+        size: 10,
+        font: fontRegular,
+        color: rgb(0.12, 0.16, 0.23),
+      });
+      y -= 14;
+    }
+  }
+
+  const bytes = await pdfDoc.save();
+  const pdfBuffer = Buffer.from(bytes);
+  const extractedLayout = await extractPdfTextAndLayout(pdfBuffer);
+  const detectedBox = findLocationBoxOnPage1(extractedLayout.page1Segments, locText);
+
+  return {
+    pdfBuffer,
+    extractedText: extractedLayout.extractedText || params.resumeText,
+    locationBox: detectedBox.hasLocationBox ? detectedBox : locationBox,
+  };
+}
